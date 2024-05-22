@@ -1,6 +1,13 @@
 # nRF9160 Feather Examples and Drivers
 
-Zephyr examples and drivers for the nRF9160 Feather.
+Zephyr examples and drivers for the [nRF9160 Feather](https://github.com/circuitdojo/nrf9160-feather).
+
+## Purchase
+
+Considering supporting the project and purchasing a nRF9160 Feather at the following locations:
+
+1. [The Circuit Dojo Official Store](https://www.circuitdojo.com/products/nrf9160-feather)
+2. [Digikey](https://www.digikey.com/en/products/detail/circuit-dojo/PASSY-NRF9160-FEATHER/13668137)
 
 ## Setup
 
