@@ -10,17 +10,25 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/drivers/regulator.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(main);
 
 #include <modem/lte_lc.h>
 #include <modem/nrf_modem_lib.h>
 
 /* Gpios */
 static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160_NS)
 static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec latch_en = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), latch_en_gpios);
 
 static const struct gpio_dt_spec wp = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), wp_gpios);
 static const struct gpio_dt_spec hold = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), hold_gpios);
+#elif defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161_NS)
+static const struct device *buck2 = DEVICE_DT_GET(DT_NODELABEL(npm1300_buck2));
+#endif
 
 static void setup_accel(void)
 {
@@ -51,11 +59,13 @@ static int setup_gpio(void)
 {
 
 	gpio_pin_configure_dt(&sw0, GPIO_DISCONNECTED);
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160_NS)
 	gpio_pin_configure_dt(&led0, GPIO_DISCONNECTED);
 	gpio_pin_configure_dt(&latch_en, GPIO_DISCONNECTED);
 
 	gpio_pin_configure_dt(&wp, GPIO_INPUT | GPIO_PULL_UP);
 	gpio_pin_configure_dt(&hold, GPIO_INPUT | GPIO_PULL_UP);
+#endif
 
 	return 0;
 }
@@ -82,7 +92,7 @@ int setup_uart()
 
 int main(void)
 {
-	printk("active_sleep\n");
+	LOG_INF("Active Sleep Sample");
 
 	/* Setup GPIO */
 	setup_gpio();
@@ -92,10 +102,19 @@ int main(void)
 
 	/* Init modem */
 	nrf_modem_lib_init();
-	lte_lc_init();
+
+	/* Wait */
+	k_sleep(K_SECONDS(2));
 
 	/* Peripherals */
 	setup_uart();
+
+	/* Disable regulator */
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161_NS)
+	int err = regulator_disable(buck2);
+	if (err < 0)
+		LOG_ERR("Failed to disable buck2: %d", err);
+#endif
 
 	return 0;
 }

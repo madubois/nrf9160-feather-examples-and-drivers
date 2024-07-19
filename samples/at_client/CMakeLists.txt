@@ -12,5 +12,5 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
 # NORDIC SDK APP START
-target_sources(app PRIVATE ${NRF_DIR}/samples/nrf9160/at_client/src/main.c)
+target_sources(app PRIVATE ${NRF_DIR}/samples/cellular/at_client/src/main.c)
 # NORDIC SDK APP END
