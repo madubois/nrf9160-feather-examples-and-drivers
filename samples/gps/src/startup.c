@@ -5,6 +5,7 @@
 
 #define POWER_MODE_PIN 13
 
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160_NS)
 const struct device *gpio = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 
 static int gps_sample_setup(void)
@@ -19,5 +20,11 @@ static int gps_sample_setup(void)
 
     return 0;
 }
+#else
+static int gps_sample_setup(void)
+{
+    return 0;
+}
+#endif
 
 SYS_INIT(gps_sample_setup, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

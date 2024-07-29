@@ -58,24 +58,18 @@
 };
 
 &uart1 {
-	current-speed = <115200>;
+	current-speed = <1000000>;
 	pinctrl-0 = <&uart1_default>;
 	pinctrl-1 = <&uart1_sleep>;
 	pinctrl-names = "default", "sleep";
 };
 
-&uart2 {
-	pinctrl-0 = <&uart2_default>;
-	pinctrl-1 = <&uart2_sleep>;
-	pinctrl-names = "default", "sleep";
-};
-
-&i2c1 {
+&i2c2 {
 	compatible = "nordic,nrf-twim";
 	status = "okay";
 
-	pinctrl-0 = <&i2c1_default>;
-	pinctrl-1 = <&i2c1_sleep>;
+	pinctrl-0 = <&i2c2_default>;
+	pinctrl-1 = <&i2c2_sleep>;
 	pinctrl-names = "default", "sleep";
 
 	lis2dh: lis2dh@19 {
@@ -108,7 +102,7 @@
 			term-warm-microvolt = <4000000>;
 			current-microamp = <800000>;
 			dischg-limit-microamp = <1000000>;
-			vbus-limit-microamp = <500000>;
+			vbus-limit-microamp = <1000000>;
 			thermistor-ohms = <10000>;
 			thermistor-beta = <3380>;
 			charging-enable;
@@ -118,16 +112,17 @@
 			compatible = "nordic,npm1300-regulator";
 
 			npm1300_buck1: BUCK1 {
-				// regulator-min-microvolt = <2700000>;
-				// regulator-max-microvolt = <3300000>;
-				// regulator-always-on;
+				regulator-min-microvolt = <2700000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
 			};
 
 			npm1300_buck2: BUCK2 {
-				// regulator-min-microvolt = <3300000>;
-				// regulator-max-microvolt = <3300000>;
-				// regulator-init-microvolt = <3300000>;
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
 			};
+
+
 		};
 	};
 
