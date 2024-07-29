@@ -6,9 +6,6 @@
 
 if BOARD_CIRCUITDOJO_FEATHER_NRF9161 || BOARD_CIRCUITDOJO_FEATHER_NRF9161_NS
 
-config BOARD
-	default "circuitdojo_feather_nrf9161"
-
 # By default, if we build for a Non-Secure version of the board,
 # enable building with TF-M as the Secure Execution Environment.
 config BUILD_WITH_TFM

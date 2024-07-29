@@ -5,9 +5,6 @@
 
 if BOARD_CD_TEST_BOARD
 
-config BOARD
-	default "cd_test_board"
-
 if USB
 
 config USB_NRFX
