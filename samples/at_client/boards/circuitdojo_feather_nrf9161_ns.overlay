@@ -3,3 +3,8 @@
 		nordic,modem-trace-uart = &uart1;
 	};
 };
+
+&uart1 {
+	status = "okay";
+	current-speed = <1000000>;
+};
