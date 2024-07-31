@@ -7,9 +7,9 @@ Zephyr examples and drivers for the nRF9160 Feather.
 1. Before you get started, you'll need to install the nRF Connect SDK. Here are
    the full instructions:
 
-   - [Mac](https://docs.jaredwolff.com/nrf9160-sdk-setup-mac.html)
-   - [Windows](https://docs.jaredwolff.com/nrf9160-sdk-setup-windows.html)
-   - [Linux](https://docs.jaredwolff.com/nrf9160-sdk-setup-linux.html)
+   - [Mac](https://docs.circuitdojo.com/nrf9160-sdk-setup-mac.html)
+   - [Windows](https://docs.circuitdojo.com/nrf9160-sdk-setup-windows.html)
+   - [Linux](https://docs.circuitdojo.com/nrf9160-sdk-setup-linux.html)
 
 2. Initialize your repository using this Git url:
    `https://github.com/circuitdojo/nrf9160-feather-examples-and-drivers.git` and
