@@ -5,7 +5,7 @@ on: [push, pull_request]
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: zephyrprojectrtos/ci:v0.26.4
+    container: zephyrprojectrtos/ci:v0.26.13
     env:
       CMAKE_PREFIX_PATH: /opt/toolchains
     strategy:
@@ -69,7 +69,7 @@ jobs:
       - name: Build ${{ matrix.sample }} for ${{ matrix.target }}
         working-directory: nfed
         run: |
-          west build -b ${{ matrix.target }} -s samples/${{ matrix.sample }} -p
+          west build -b ${{ matrix.target }} -s samples/${{ matrix.sample }} -p --sysbuild
           mkdir -p .out
           cp build/zephyr/app_update.bin .out/${{ matrix.sample }}_${{ matrix.target }}_app_update.bin
           cp build/zephyr/merged.hex .out/${{ matrix.sample }}_${{ matrix.target }}_merged.hex
