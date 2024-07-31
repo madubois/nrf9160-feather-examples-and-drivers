@@ -14,9 +14,10 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main);
 
-/* RTC control */
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160_NRF9160_NS)
 static const struct device *rtc = DEVICE_DT_GET(DT_ALIAS(rtc0));
 
+/* RTC control */
 static void rtc_init()
 {
 
@@ -72,3 +73,6 @@ int main(void)
 
 	return 0;
 }
+#else
+#error "Unsupported board"
+#endif

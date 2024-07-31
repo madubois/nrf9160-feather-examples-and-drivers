@@ -12,7 +12,7 @@ int main(void)
 
 	printk("Deep sleep sample\n");
 
-#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161_NS)
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161)
 	static const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300_pmic));
 
 	/* set hibernate mode and power down */

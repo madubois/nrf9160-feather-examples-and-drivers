@@ -157,5 +157,5 @@ References
 **Side note** This page was based on the documentation for the nRF9161 DK. Thanks to Nordic for
 developing a great platform!
 
-.. _nRF9161 Feather Documentation: https://docs.jaredwolff.com/nrf9161-introduction.html
-.. _Getting Started: https://docs.jaredwolff.com/nrf9161-getting-started.html
+.. _nRF9161 Feather Documentation: https://docs.circuitdojo.com/nrf9161-introduction.html
+.. _Getting Started: https://docs.circuitdojo.com/nrf9161-getting-started.html

@@ -1,11 +1,11 @@
 
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/mfd/npm1300.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(app_startup);
 
 #if IS_ENABLED(CONFIG_MFD_NPM1300)
+#include <zephyr/drivers/mfd/npm1300.h>
 
 #define SYSREG_VBUSIN_BASE 0x02
 

@@ -6,7 +6,7 @@ board:
       variants:
         - name: ns
   revision:
-    format: major.minor.patch
-    default: "1.0.0"
+    format: number
+    default: "1"
     revisions:
-      - name: "1.0.0"
+      - name: "1"

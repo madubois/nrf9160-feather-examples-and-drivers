@@ -20,14 +20,16 @@ LOG_MODULE_REGISTER(main);
 
 /* Gpios */
 static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160_NS)
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160)
 static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec latch_en = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), latch_en_gpios);
 
 static const struct gpio_dt_spec wp = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), wp_gpios);
 static const struct gpio_dt_spec hold = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), hold_gpios);
-#elif defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161_NS)
+#elif defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161)
 static const struct device *buck2 = DEVICE_DT_GET(DT_NODELABEL(npm1300_buck2));
+#else
+#error "Unsupported board"
 #endif
 
 static void setup_accel(void)

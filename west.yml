@@ -21,18 +21,6 @@ manifest:
           - lz4
           - lvgl
           - mipi-sys-t
-    # Golioth backend
-    - name: golioth
-      path: modules/lib/golioth
-      revision: 2392a46a71d07a431450560aa7688404406788da
-      url: https://github.com/golioth/golioth-zephyr-sdk
-      import: west-external.yml
-    # Pyrinas backend
-    - name: pyrinas
-      url: https://github.com/pyrinas-iot/pyrinas-zephyr
-      revision: v1.9.x
-      path: pyrinas
-      import: true
     # RTC Driver
     - name: pcf85063a
       url: https://github.com/circuitdojo/pcf85063a

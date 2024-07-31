@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <drivers/i2c.h>
+#include <zephyr/drivers/i2c.h>
 
 #define LIS2DH_ADDR 0x18
 #define LIS2DH_REG_WAI 0x0f
@@ -19,15 +19,15 @@
 
 #define LIS2Dh_REG_CTRL0_DEF 0b00010000
 
-void main(void)
+int main(void)
 {
     uint8_t who_am_i = 0;
-    const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+    const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c2));
 
     if (i2c_dev == NULL || !device_is_ready(i2c_dev))
     {
         printf("Could not get I2C device\n");
-        return;
+        return -1;
     }
 
     /* Read the Who Am I register */
@@ -36,7 +36,7 @@ void main(void)
     if (ret)
     {
         printf("Unable get WAI data. (err %i)\n", ret);
-        return;
+        return ret;
     }
 
     printf("Who am I: 0x%x\n", who_am_i);
@@ -47,7 +47,7 @@ void main(void)
     if (ret)
     {
         printf("Unable write to CTRL0. (err %i)\n", ret);
-        return;
+        return ret;
     }
 
     printf("CTRL0 set to default.\n");
@@ -59,7 +59,7 @@ void main(void)
     if (ret)
     {
         printf("Unable write to CTRL1. (err %i)\n", ret);
-        return;
+        return ret;
     }
 
     printf("CTRL1 LIS2DH_ACCEL_X_EN_BIT set.\n");
@@ -70,7 +70,7 @@ void main(void)
     if (ret)
     {
         printf("Unable to burst read CTRL0 + CTRL1. (err %i)\n", ret);
-        return;
+        return ret;
     }
 
     printf("CTRL0: 0x%x CTRL1: 0x%x\n", ctrl0_ctrl1[0], ctrl0_ctrl1[1]);
@@ -80,8 +80,10 @@ void main(void)
     if (ret)
     {
         printf("Unable to burst write CTRL0 + CTRL1. (err %i)\n", ret);
-        return;
+        return ret;
     }
 
     printf("CTRL0 + CTRL1 burst write complete!\n");
+
+    return 0;
 }

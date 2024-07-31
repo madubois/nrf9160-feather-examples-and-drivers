@@ -1,14 +1,14 @@
-# Modem Firmware Update 
+# Modem Firmware Update
 
-This sample can be used to load new modem firmware to your device using the *bootloader only*. This is useful if you do not have a programmer!
+This sample can be used to load new modem firmware to your device using the _bootloader only_. This is useful if you do not have a programmer!
 
 ## Setup
 
 Make sure you have the VSCode plugin installed and running. Here are the instructions for each major architecture:
 
-* [Windows](https://docs.jaredwolff.com/nrf9160-sdk-setup-windows.html#installing-sdk)
-* [Mac](https://docs.jaredwolff.com/nrf9160-sdk-setup-mac.html#installing-sdk)
-* [Linux](https://docs.jaredwolff.com/nrf9160-sdk-setup-linux.html#installing-sdk)
+- [Windows](https://docs.circuitdojo.com/nrf9160-sdk-setup-windows.html#installing-sdk)
+- [Mac](https://docs.circuitdojo.com/nrf9160-sdk-setup-mac.html#installing-sdk)
+- [Linux](https://docs.circuitdojo.com/nrf9160-sdk-setup-linux.html#installing-sdk)
 
 ## Get the modem firmware
 
@@ -16,7 +16,7 @@ Get your modem firmware of choice by nagivating to the [nRF9160 Download page](h
 
 ![Download page](img/download-page.png)
 
-Download the version you'd like to use. 
+Download the version you'd like to use.
 
 **IMPORTANT:** currently nRF9160 Feather is shipped with version 1.2.3 of the modem firmware. If you upgrade > v1.3.0 **you cannot downgrade** according to Nordic.
 

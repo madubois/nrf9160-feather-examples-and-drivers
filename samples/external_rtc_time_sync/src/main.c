@@ -21,6 +21,8 @@ LOG_MODULE_REGISTER(main);
 
 K_SEM_DEFINE(date_time_ready, 0, 1);
 
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160_NRF9160_NS)
+
 /* RTC control */
 static const struct device *rtc = DEVICE_DT_GET(DT_ALIAS(rtc0));
 
@@ -72,7 +74,7 @@ int main(void)
 	rtc_init();
 
 	/* Init lte_lc*/
-	err = lte_lc_init_and_connect();
+	err = lte_lc_connect();
 	if (err)
 		LOG_ERR("Failed to init and connect. Err: %i", err);
 
@@ -143,3 +145,7 @@ int main(void)
 
 	return 0;
 }
+
+#else
+#error "Unsupported board"
+#endif

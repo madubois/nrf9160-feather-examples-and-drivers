@@ -10,8 +10,40 @@ jobs:
       CMAKE_PREFIX_PATH: /opt/toolchains
     strategy:
       matrix:
-        sample: [accelerometer, accelerometer_zbus, active_sleep, at_client, battery, blinky, bme280, button, deep_sleep, external_flash, external_rtc, external_rtc_time_sync, led_pwm, mfw_update, nanopb, sms]
-        target: [circuitdojo_feather_nrf9160_ns]
+        sample:
+          [
+            accelerometer,
+            accelerometer_zbus,
+            active_sleep,
+            at_client,
+            battery,
+            blinky,
+            bme280,
+            button,
+            deep_sleep,
+            external_flash,
+            external_rtc,
+            external_rtc_time_sync,
+            led_pwm,
+            mfw_update,
+            nanopb,
+            sms,
+          ]
+        target:
+          [
+            circuitdojo_feather_nrf9160/nrf9160/ns,
+            circuitdojo_feather_nrf9161/nrf9161/ns,
+          ]
+        exclude:
+          # List of target-app combinations to exclude
+          - target: circuitdojo_feather_nrf9160/nrf9160/ns
+            sample: deep_sleep
+          - target: circuitdojo_feather_nrf9161/nrf9161/ns
+            sample: external_rtc
+          - target: circuitdojo_feather_nrf9161/nrf9161/ns
+            sample: external_rtc_time_sync
+          - target: circuitdojo_feather_nrf9161/nrf9161/ns
+            sample: led_pwm
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -23,8 +55,8 @@ jobs:
         working-directory: nfed
         id: vars
         run: |
-             echo "branch=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
-             echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "branch=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Initialize
         working-directory: nfed
