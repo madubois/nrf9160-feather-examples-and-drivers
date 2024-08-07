@@ -49,7 +49,10 @@ static int sample_setup(void)
     }
     else
     {
-        printk("Vsys Current Limit: %d mA\n", data * 100);
+        if (data == 0)
+            data = 5;
+
+        printk("*** Vsys Current Limit: %d mA ***\n", data * 100);
     }
 
     return 0;
