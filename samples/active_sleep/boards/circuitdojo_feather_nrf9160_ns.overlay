@@ -12,10 +12,6 @@
     };
 };
 
-&gpio0 {
-    sense-edge-mask = <0xffff>;
-};
-
 &spi3 {
     w25q32jv: w25q32jv@0 {
         /delete-property/ wp-gpios;

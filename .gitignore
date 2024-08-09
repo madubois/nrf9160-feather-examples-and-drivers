@@ -51,6 +51,7 @@ Module.symvers
 Mkfile.old
 dkms.conf
 version.conf
+.cache
 
 # Zephyr related
 build
