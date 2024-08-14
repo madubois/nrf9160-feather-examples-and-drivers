@@ -55,6 +55,9 @@ static int sysreg_setup(void)
         return ret;
     }
 
+    /* Delay boot for programmer */
+    k_sleep(K_SECONDS(2));
+
     return 0;
 }
 

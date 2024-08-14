@@ -3,29 +3,64 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#include <zephyr/kernel.h>
 #include <zephyr/drivers/mfd/npm1300.h>
+#include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 
-int main(void)
-{
+#define SHIP_BASE 0x0BU
+#define SHIP_OFFSET_TASKENTERSHIPMODE 0x02U
 
-	printk("Deep sleep sample\n");
+/* Addresses */
+#define NPM1300_BUCK_BASE 0x04U
+#define NPM1300_BUCK_OFFSET_EN_CLR 0x01U
+#define NPM1300_BUCK_BUCKCTRL0 0x15U
+#define NPM1300_BUCK_STATUS 0x34U
+
+int main(void) {
+
+  printk("Deep sleep sample\n");
 
 #if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161)
-	static const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300_pmic));
+  static const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300_pmic));
 
-	/* set hibernate mode and power down */
-	int ret = mfd_npm1300_hibernate(pmic, 60000);
-	if (ret < 0)
-	{
-		printk("Failed to hibernate. Err: %d\n", ret);
-		return ret;
-	}
+  int ret;
+  uint8_t reg = 0;
+
+  /* See if pulldown is not already enabled */
+  ret = mfd_npm1300_reg_read(pmic, NPM1300_BUCK_BASE, NPM1300_BUCK_BUCKCTRL0,
+                             &reg);
+  if (ret < 0)
+    printk("Failed to set VBUSINLIM. Err: %d\n", ret);
+
+  if ((reg & 0x08) == 0) {
+
+    /* Write to MFD to enable pulldown for both Bucks */
+    ret = mfd_npm1300_reg_write(pmic, NPM1300_BUCK_BASE, NPM1300_BUCK_BUCKCTRL0,
+                                0x08 + 0x04);
+    if (ret < 0)
+      printk("Failed to set VBUSINLIM. Err: %d\n", ret);
+  }
+
+#if false
+    /* set hibernate mode and power down */
+    ret = mfd_npm1300_hibernate(pmic, 60000);
+    if (ret < 0) {
+      printk("Failed to hibernate. Err: %d\n", ret);
+      return ret;
+    }
+#else
+  /* Put into ship mode */
+  ret =
+      mfd_npm1300_reg_write(pmic, SHIP_BASE, SHIP_OFFSET_TASKENTERSHIPMODE, 1U);
+  if (ret < 0) {
+    printk("Failed to go into ship mode. Err: %i\n", ret);
+    return ret;
+  }
+#endif
 
 #else
 #error Sample not supported on this board
 #endif
 
-	return 0;
+  return 0;
 }
