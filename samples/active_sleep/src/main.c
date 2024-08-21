@@ -26,6 +26,10 @@ LOG_MODULE_REGISTER(main);
 #define NPM1300_BUCK_BUCKCTRL0 0x15U
 #define NPM1300_BUCK_STATUS 0x34U
 
+/* Bits */
+#define NPM1300_BUCK2_MODE_BIT BIT(0)
+#define NPM1300_BUCK2_PULLDOWN_EN BIT(3)
+
 /* Gpios */
 static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 #if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160)
@@ -41,15 +45,15 @@ static const struct gpio_dt_spec hold =
 
 #if IS_ENABLED(CONFIG_REGULATOR_NPM1300)
 static const struct device *buck2 = DEVICE_DT_GET(DT_NODELABEL(npm1300_buck2));
-#else
-static const struct device *dev_i2c2 = DEVICE_DT_GET(DT_NODELABEL(i2c2));
 #endif
 
-static void setup_accel(void) {
+static void setup_accel(void)
+{
   const struct device *sensor = DEVICE_DT_GET(DT_ALIAS(accel0));
 
-  if (!device_is_ready(sensor)) {
-    printk("Could not get accel0 device\n");
+  if (!device_is_ready(sensor))
+  {
+    LOG_ERR("Could not get accel0 device");
     return;
   }
 
@@ -60,13 +64,15 @@ static void setup_accel(void) {
 
   int rc = sensor_attr_set(sensor, SENSOR_CHAN_ACCEL_XYZ,
                            SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
-  if (rc != 0) {
-    printk("Failed to set odr: %d\n", rc);
+  if (rc != 0)
+  {
+    LOG_ERR("Failed to set odr: %d", rc);
     return;
   }
 }
 
-static int setup_gpio(void) {
+static int setup_gpio(void)
+{
 
   gpio_pin_configure_dt(&sw0, GPIO_DISCONNECTED);
 #if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9160)
@@ -80,15 +86,17 @@ static int setup_gpio(void) {
   return 0;
 }
 
-int setup_uart() {
+int setup_uart()
+{
 
   static const struct device *const console_dev =
       DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 
   /* Disable console UART */
   int err = pm_device_action_run(console_dev, PM_DEVICE_ACTION_SUSPEND);
-  if (err < 0) {
-    printk("Unable to suspend console UART. (err: %d)\n", err);
+  if (err < 0)
+  {
+    LOG_ERR("Unable to suspend console UART. (err: %d)", err);
     return err;
   }
 
@@ -98,44 +106,29 @@ int setup_uart() {
   return 0;
 }
 
-static int setup_pmic() {
+static int setup_pmic()
+{
 
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161)
   int err;
 
-#if IS_ENABLED(CONFIG_REGULATOR_NPM1300)
+  /* Get pmic */
+  static const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300_pmic));
+  if (!pmic)
+  {
+    LOG_ERR("Failed to get PMIC device\n");
+    return -ENODEV;
+  }
 
   /* Disable if not already disabled */
-  if (regulator_is_enabled(buck2)) {
+  if (regulator_is_enabled(buck2))
+  {
     err = regulator_disable(buck2);
-    if (err < 0) {
+    if (err < 0)
+    {
       LOG_ERR("Failed to disable buck2: %d", err);
       return err;
     }
-  }
-#else
-  // Write necessary commands to disable buck
-  // return mfd_npm1300_reg_write(config->mfd, BUCK_BASE, BUCK_OFFSET_EN_CLR +
-  // 2U, 1U);
-  {
-    uint8_t buff[] = {NPM1300_BUCK_BASE, NPM1300_BUCK_OFFSET_EN_CLR + 2U, 1U};
-
-    int err = i2c_write(dev_i2c2, buff, sizeof(buff), 0x6B);
-    if (err < 0) {
-      return err;
-    }
-  }
-
-  uint8_t buff[] = {NPM1300_BUCK_BASE, NPM1300_BUCK_BUCKCTRL0, 0x08};
-  return i2c_write(dev_i2c2, buff, sizeof(buff), 0x6B);
-
-#endif
-
-#if IS_ENABLED(CONFIG_MFD_NPM1300)
-  /* Get pmic */
-  static const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300_pmic));
-  if (!pmic) {
-    LOG_ERR("Failed to get PMIC device\n");
-    return -ENODEV;
   }
 
   uint8_t reg = 0;
@@ -144,33 +137,41 @@ static int setup_pmic() {
   err = mfd_npm1300_reg_read(pmic, NPM1300_BUCK_BASE, NPM1300_BUCK_BUCKCTRL0,
                              &reg);
   if (err < 0)
-    printk("Failed to set VBUSINLIM. Err: %d\n", err);
+    LOG_ERR("Failed to set VBUSINLIM. Err: %d", err);
 
-  if ((reg & 0x08) == 0) {
+  if ((reg & (NPM1300_BUCK2_PULLDOWN_EN)) == 0)
+  {
 
     /* Write to MFD to enable pulldown for BUCK2 */
     err = mfd_npm1300_reg_write(pmic, NPM1300_BUCK_BASE, NPM1300_BUCK_BUCKCTRL0,
-                                0x08);
+                                NPM1300_BUCK2_PULLDOWN_EN);
     if (err < 0)
-      printk("Failed to set VBUSINLIM. Err: %d\n", err);
+      LOG_ERR("Failed to set VBUSINLIM. Err: %d", err);
   }
-
-  // for (int i = 0; i < 2; i++) {
-  //   reg = 0;
-  //   err = mfd_npm1300_reg_read(pmic, NPM1300_BUCK_BASE, NPM1300_BUCK_STATUS,
-  //                              &reg);
-  //   if (err < 0)
-  //     printk("Failed to read buck status: Err: %i", err);
-  //   else
-  //     printk("Buck status: %i", reg);
-  // }
 
 #endif
 
   return 0;
 }
 
-int main(void) {
+int nor_storage_init(void)
+{
+
+  static const struct device *spi_nor = DEVICE_DT_GET(DT_ALIAS(ext_flash));
+
+  /* Disable external flash */
+  int err = pm_device_action_run(spi_nor, PM_DEVICE_ACTION_SUSPEND);
+  if (err < 0)
+  {
+    LOG_ERR("Unable to suspend SPI NOR flash. (err: %d)", err);
+    return err;
+  }
+
+  return 0;
+}
+
+int main(void)
+{
   int err = 0;
 
   LOG_INF("Active Sleep Sample");
@@ -180,6 +181,9 @@ int main(void) {
 
   /* Disable accel */
   setup_accel();
+
+  /* Init NOR */
+  nor_storage_init();
 
   /* Init modem */
   err = nrf_modem_lib_init();

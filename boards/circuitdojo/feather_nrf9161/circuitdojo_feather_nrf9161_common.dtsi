@@ -35,6 +35,7 @@
 		watchdog0 = &wdt0;
 		spi-flash0 = &w25q128jv;
 		accel0 = &lis2dh;
+		ext-flash = &w25q128jv;
 	};
 };
 
@@ -150,8 +151,8 @@
 		spi-max-frequency = <40000000>;
 		size = <0x8000000>;
 		has-dpd;
-		t-enter-dpd = <3500>;
-		t-exit-dpd = <3500>;
+		t-enter-dpd = <30000>;
+		t-exit-dpd = <30000>;
 		jedec-id = [ ef 40 18  ];
 	};
 };

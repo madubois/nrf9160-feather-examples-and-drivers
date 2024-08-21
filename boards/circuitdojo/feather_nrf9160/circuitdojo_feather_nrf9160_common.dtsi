@@ -46,13 +46,13 @@
 	/* These aliases are provided for compatibility with samples */
 	aliases {
 		led0 = &blue_led;
-		bootloader-led0 = &blue_led;
 		pwm-led0 = &pwm_led0;
 		sw0 = &button0;
 		mcuboot-button0 = &button0;
 		mcuboot-led0 = &blue_led;
 		watchdog0 = &wdt0;
 		spi-flash0 = &w25q32jv;
+		ext-flash = &w25q32jv;
 		accel0 = &lis2dh;
 		rtc0 = &pcf85063a;
 	};
@@ -165,7 +165,7 @@
 		hold-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
 		size = <0x2000000>;
 		has-dpd;
-		t-enter-dpd = <3000>;
+		t-enter-dpd = <30000>;
 		t-exit-dpd = <30000>;
 		jedec-id = [ ef 40 16  ];
 	};

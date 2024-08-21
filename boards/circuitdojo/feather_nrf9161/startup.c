@@ -30,7 +30,8 @@ static int sysreg_setup(void)
     }
     else
     {
-        if (data == 0){
+        if (data == 0)
+        {
             data = 5;
 
             printk("*** Vsys Current Limit: %d mA ***\n", data * 100);
