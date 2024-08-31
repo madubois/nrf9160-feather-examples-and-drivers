@@ -12,7 +12,4 @@ config BOARD_CIRCUITDOJO_FEATHER_NRF9161
 config BOARD_CIRCUITDOJO_FEATHER_NRF9161_NS
 	bool "Circuit Dojo nRF9161 Feather non-secure"
 
-config BOARD_CIRCUITDOJO_FEATHER_NRF9161_PMIC_STARTUP
-	bool "Allows for executing startup code for PMIC."
-
 endif # SOC_NRF9161_LACA
