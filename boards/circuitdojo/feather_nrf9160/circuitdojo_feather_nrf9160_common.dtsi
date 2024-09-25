@@ -92,6 +92,14 @@
 		enable-gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;
 		regulator-boot-on;
 	};
+
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc 7>;
+		output-ohms = <100000>;
+		full-ohms = <(100000 + 100000)>;
+		power-gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &adc {
@@ -220,16 +228,6 @@
 		sram0_ns: image_ns@20020000 {
 			/* Non-Secure image memory */
 		};
-	};
-};
-
-/ {
-	vbatt {
-		compatible = "voltage-divider";
-		io-channels = <&adc 7>;
-		output-ohms = <100000>;
-		full-ohms = <(100000 + 100000)>;
-		power-gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
 	};
 };
 
