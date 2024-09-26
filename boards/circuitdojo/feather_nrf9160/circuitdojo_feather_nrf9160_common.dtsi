@@ -100,6 +100,21 @@
 		full-ohms = <(100000 + 100000)>;
 		power-gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
 	};
+
+	fstab {
+		compatible = "zephyr,fstab";
+		lfs: lfs {
+			compatible = "zephyr,fstab,littlefs";
+			mount-point = "/lfs";
+			partition = <&lfs_partition>;
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+			automount;
+		};
+	};
 };
 
 &adc {
@@ -176,6 +191,16 @@
 		t-enter-dpd = <30000>;
 		t-exit-dpd = <30000>;
 		jedec-id = [ ef 40 16  ];
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			lfs_partition: partition@0 {
+				label = "lfs_partition";
+				reg = <0x00000000 DT_SIZE_M(4)>;
+			};
+		};
 	};
 };
 

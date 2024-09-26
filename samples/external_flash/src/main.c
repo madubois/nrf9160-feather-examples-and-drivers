@@ -24,49 +24,38 @@ LOG_MODULE_REGISTER(main);
 /* Matches LFS_NAME_MAX */
 #define MAX_PATH_LEN 255
 
-FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(storage);
-static struct fs_mount_t lfs_storage_mnt = {
-	.type = FS_LITTLEFS,
-	.fs_data = &storage,
-	.storage_dev = (void *)FLASH_AREA_ID(littlefs_storage),
-	.mnt_point = "/lfs",
-};
+#define PARTITION_NODE DT_NODELABEL(lfs)
+FS_FSTAB_DECLARE_ENTRY(PARTITION_NODE);
 
-static int nor_storage_erase(void)
+struct fs_mount_t *mp =
+	&FS_FSTAB_ENTRY(PARTITION_NODE);
+
+static int littlefs_flash_erase(unsigned int id)
 {
-	int err;
-	struct fs_mount_t *mp = &lfs_storage_mnt;
-	unsigned int id = (uintptr_t)mp->storage_dev;
 	const struct flash_area *pfa;
+	int rc;
 
-	/* Unmount if mounted */
-	fs_unmount(&lfs_storage_mnt);
-
-	err = flash_area_open(id, &pfa);
-	if (err < 0)
+	rc = flash_area_open(id, &pfa);
+	if (rc < 0)
 	{
-		LOG_ERR("FAIL: unable to find flash area %u: %d",
-				id, err);
-		return err;
+		LOG_ERR("FAIL: unable to find flash area %u: %d\n",
+				id, rc);
+		return rc;
 	}
 
-	LOG_INF("Area %u at 0x%x for %u bytes",
-			id, (unsigned int)pfa->fa_off,
-			(unsigned int)pfa->fa_size);
+	LOG_PRINTK("Area %u at 0x%x on %s for %u bytes\n",
+			   id, (unsigned int)pfa->fa_off, pfa->fa_dev->name,
+			   (unsigned int)pfa->fa_size);
 
-	LOG_INF("Erasing flash area ... ");
-	err = flash_area_erase(pfa, 0, pfa->fa_size);
-	LOG_INF("Done. Code: %i", err);
-
-	if (err)
+	/* Optional wipe flash contents */
+	if (IS_ENABLED(CONFIG_APP_WIPE_STORAGE))
 	{
-		LOG_ERR("Failed to erase storage. (err: %d)", err);
-		return err;
+		rc = flash_area_erase(pfa, 0, pfa->fa_size);
+		LOG_ERR("Erasing flash area ... %d", rc);
 	}
 
 	flash_area_close(pfa);
-
-	return 0;
+	return rc;
 }
 
 int nor_storage_init(void)
@@ -75,12 +64,7 @@ int nor_storage_init(void)
 	struct fs_dirent dirent;
 	struct fs_statvfs sbuf;
 
-	/* Mount filesystem */
-	err = fs_mount(&lfs_storage_mnt);
-	if (err)
-		return err;
-
-	err = fs_statvfs(lfs_storage_mnt.mnt_point, &sbuf);
+	err = fs_statvfs(mp->mnt_point, &sbuf);
 	if (err < 0)
 		LOG_ERR("statvfs: %d", err);
 
@@ -94,13 +78,8 @@ int nor_storage_init(void)
 	{
 		LOG_INF("Erasing storage!");
 
-		err = nor_storage_erase();
+		err = littlefs_flash_erase((uintptr_t)mp->storage_dev);
 		if (err < 0)
-			return err;
-
-		/* Re-mount */
-		err = fs_mount(&lfs_storage_mnt);
-		if (err)
 			return err;
 
 		/* Create folder */
@@ -167,7 +146,7 @@ int main(void)
 {
 	int err;
 
-	LOG_INF("External Flash on %s\n", CONFIG_BOARD);
+	LOG_INF("External Flash on %s", CONFIG_BOARD);
 
 	err = nor_storage_init();
 	if (err < 0)

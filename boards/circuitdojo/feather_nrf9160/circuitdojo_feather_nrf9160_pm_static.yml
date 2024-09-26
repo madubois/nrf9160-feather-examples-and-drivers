@@ -41,3 +41,7 @@ tfm_nonsecure:
 tfm:
   address: 0x10200
   size: 0x7e00
+littlefs_storage:
+  address: 0x0
+  region: external_flash
+  size: 0x400000
