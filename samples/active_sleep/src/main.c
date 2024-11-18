@@ -109,7 +109,7 @@ int setup_uart()
 static int setup_pmic()
 {
 
-#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161)
+#if defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9161) || defined(CONFIG_BOARD_CIRCUITDOJO_FEATHER_NRF9151)
   int err;
 
   /* Get pmic */
