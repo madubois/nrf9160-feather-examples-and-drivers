@@ -54,7 +54,7 @@ version.conf
 .cache
 
 # Zephyr related
-build
+build*
 sparkfun
 .vscode
 twister-out*
