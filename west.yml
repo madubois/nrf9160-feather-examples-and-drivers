@@ -9,6 +9,7 @@ manifest:
       remote: nrfconnect
       revision: v2.7.0
       import:
+        path-prefix: external
         name-blocklist:
           - matter
           - nrf-802154
@@ -21,6 +22,7 @@ manifest:
           - lz4
           - lvgl
           - mipi-sys-t
+      clone-depth: 1
     # RTC Driver
     - name: pcf85063a
       url: https://github.com/circuitdojo/pcf85063a
