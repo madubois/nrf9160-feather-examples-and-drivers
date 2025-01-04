@@ -64,6 +64,8 @@ void event_manager_thread(void *, void *, void *)
 
     for (;;)
     {
+        app_backend_disconnect();
+
         int err = 0;
         struct app_event evt = {0};
         k_msgq_get(&app_event_msq, &evt, K_FOREVER);

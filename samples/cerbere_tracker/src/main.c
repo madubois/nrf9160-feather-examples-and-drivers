@@ -105,5 +105,8 @@ int main(void)
 	if (err < 0)
 		__ASSERT_MSG_INFO("Unable to setup GPS. Err: %i", err);
 
+	LOG_INF("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");
+
+
 	return 0;
 }

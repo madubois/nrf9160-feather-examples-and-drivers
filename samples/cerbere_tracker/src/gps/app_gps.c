@@ -68,6 +68,7 @@ static void gnss_event_handler(int event)
         if (retval == 0)
         {
             LOG_DBG("Got NMEA data");
+            LOG_INF("%s", nmea_data.nmea_str);
         }
         break;
 
