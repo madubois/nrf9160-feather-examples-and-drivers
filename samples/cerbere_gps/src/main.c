@@ -569,6 +569,22 @@ static bool output_paused(void)
 #endif
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
 	uint8_t tracked   = 0;
@@ -599,14 +615,82 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 
 
 
+//////////////////////////////////////////
+#include <string.h>
+#include <zephyr/kernel.h>
+#include <stdlib.h>
+#include <zephyr/net/socket.h>
+#include <modem/nrf_modem_lib.h>
+#include <zephyr/net/tls_credentials.h>
+#include <modem/lte_lc.h>
+#include <modem/modem_key_mgmt.h>
+#include <zephyr/data/json.h>
+
+
+#define HTTP_HOST "serveur.duckdns.org"
+#define HTTP_PATH "/coord2"
+#define HTTP_PORT 8545
+#define MAX_MTU_SIZE     2000
+#define RECV_BUF_SIZE    2048
+#define SEND_BUF_SIZE    MAX_MTU_SIZE
+
+#define TEST_STRING "T"
+
+//#define JSON_TEMPLATE "{\"Angle X\": %d\"Angle Y\": %d\"Angle Z\": %d}"
+#define JSON_TEMPLATE "%d,%.9f,%.9f}"
+
+
+
+
+
+    char send_buf[2000];
+
+
+
+
+int blocking_recv(int fd, uint8_t *buf, uint32_t size, uint32_t flags)
+{
+    int err;
+
+      do {
+            err = recv(fd, buf, size, flags);
+        } while (err < 0 && errno == EAGAIN);
+
+      return err;
+}
+
+int blocking_send(int fd, uint8_t *buf, uint32_t size, uint32_t flags)
+{
+    int err;
+
+    do {
+        err = send(fd, buf, size, flags);
+    } while (err < 0 && (errno == EAGAIN));
+
+    return err;
+}
+
+int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
+{
+    int err;
+
+    do {
+        err = connect(fd, local_addr, len);
+    } while (err < 0 && errno == EAGAIN);
+
+    return err;
+}
+
+
+///////////////////////////////////////////
 
 
 
 
 
 
-
-
+float lat=0;
+float lng=0;
 
 
 
@@ -633,6 +717,114 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 
 	LOG_INF("Connected...");
 
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+
+struct sockaddr_in local_addr;
+    struct addrinfo *res;
+    int send_data_len;
+    int num_bytes;
+    int mtu_size = MAX_MTU_SIZE;
+    //char send_buf[SEND_BUF_SIZE];
+   
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(0);
+    local_addr.sin_addr.s_addr = 0;
+
+
+	struct addrinfo hints = {
+		.ai_family = AF_INET,       //1
+		.ai_socktype = SOCK_DGRAM,  //2
+        .ai_next = NULL,
+        .ai_addr = NULL,
+        .ai_protocol = 0   //any protocol
+	};
+
+    int err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
+    LOG_INF("getaddrinfo err: %d\n\r", err);
+	
+    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+   
+	
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d\n\r", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d\n\r", err);
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d\n\r", err);
+
+	
+
+    LOG_INF("\n\rPrepare send buffer:\n\r");
+
+    int ts=300;
+    //float lat=12.2;
+    //float lng=-12.5;
+
+	/*
+	LOG_INF(						 "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n"
+                                     "Connection: keep-alive\r\n"
+                                     "Content-Type: application/json\r\n"
+                                     "Content-length: %d\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, strlen(JSON_TEMPLATE) + 3, angle_x, angle_y, angle_z);
+
+	int x = 123;
+	send_data_len = snprintf(send_buf,sizeof send_buf, "%dx", x);
+	*/
+	
+
+	/*
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n"
+                                     "Content-length: %d\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, strlen(JSON_TEMPLATE) + 3, ts, lat, lng);
+	
+	*/
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, ts, lat, lng);
+	
+   
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+
+    } while (num_bytes < 0);
+
+    LOG_INF("\n\rFinished. Closing socket\n");
+    err = close(client_fd);
+
+    freeaddrinfo(res);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////
 
     ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
 
@@ -690,7 +882,8 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	printf("VDOP:           %.01f\n", pvt_data->vdop);
 	printf("TDOP:           %.01f\n", pvt_data->tdop);
 
-
+	lat = pvt_data->latitude;
+	lng = pvt_data->longitude;
 
     int ret;
 
@@ -754,6 +947,24 @@ int main(void)
 
 	lte_lc_init();
 
+
+	/*
+    int ret;
+
+        ret = lte_lc_connect_async(lte_handler);
+        if (ret) {
+                printk("lte_lc_connect_async, error: %d\n", ret);
+                return 0;
+        }
+
+        k_sem_take(&lte_connected, K_FOREVER);
+	
+
+
+	LOG_INF("done");
+	*/
+
+	
 	for (;;) {
 		(void)k_poll(events, 2, K_FOREVER);
 
