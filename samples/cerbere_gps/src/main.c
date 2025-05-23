@@ -161,6 +161,8 @@ static void gnss_event_handler(int event)
 
 		if (retval != 0) {
 			k_free(nmea_data);
+		}else{
+			LOG_ERR("NMEA NO FREE");
 		}
 		break;
 
@@ -637,7 +639,11 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 #define TEST_STRING "T"
 
 //#define JSON_TEMPLATE "{\"Angle X\": %d\"Angle Y\": %d\"Angle Z\": %d}"
-#define JSON_TEMPLATE "%d,%.9f,%.9f}"
+#define JSON_TEMPLATE "%ld,%.9f,%.9f"
+
+
+
+
 
 
 
@@ -676,6 +682,7 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
 
     do {
         err = connect(fd, local_addr, len);
+		LOG_INF("ERROR CONNECT = %d", err);
     } while (err < 0 && errno == EAGAIN);
 
     return err;
@@ -691,7 +698,7 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
 
 float lat=0;
 float lng=0;
-
+time_t ts=0;
 
 
 
@@ -701,6 +708,10 @@ K_SEM_DEFINE(lte_connected, 0, 1);
 
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
+				//k_sleep(K_SECONDS(10));
+
+		int ret;
+
         switch (evt->type) {
         case LTE_LC_EVT_NW_REG_STATUS:
                 if (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_HOME &&
@@ -708,12 +719,11 @@ static void lte_handler(const struct lte_lc_evt *const evt)
                         break;
                 }
 
-                printk("Connected to: %s network\n",
+                printk("Connected to: %s network",
                        evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ? "home" : "roaming");
 
 
 
-	int ret;
 
 	LOG_INF("Connected...");
 
@@ -742,56 +752,30 @@ struct sockaddr_in local_addr;
 	};
 
     int err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
-    LOG_INF("getaddrinfo err: %d\n\r", err);
+    LOG_INF("getaddrinfo err: %d", err);
 	
     ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
    
-	
 
     int client_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    LOG_INF("client_fd: %d\n\r", client_fd);
+    LOG_INF("client_fd: %d", client_fd);
     err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
-    LOG_INF("bind err: %d\n\r", err);
+    LOG_INF("bind err: %d", err);
+
+
     err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
-    LOG_INF("connect err: %d\n\r", err);
+    LOG_INF("connect err: %d", err);
 
-	
 
-    LOG_INF("\n\rPrepare send buffer:\n\r");
+	if (err >= 0) {
 
-    int ts=300;
-    //float lat=12.2;
-    //float lng=-12.5;
-
-	/*
-	LOG_INF(						 "POST %s HTTP/1.1\r\n"
-                                     "Host: %s\r\n"
-                                     "Connection: keep-alive\r\n"
-                                     "Content-Type: application/json\r\n"
-                                     "Content-length: %d\r\n\r\n"
-                                     JSON_TEMPLATE,
-                                     HTTP_PATH, HTTP_HOST, strlen(JSON_TEMPLATE) + 3, angle_x, angle_y, angle_z);
-
-	int x = 123;
-	send_data_len = snprintf(send_buf,sizeof send_buf, "%dx", x);
-	*/
-	
-
-	/*
-    send_data_len = snprintf(send_buf, 2000,
-                                     "POST %s HTTP/1.1\r\n"
-                                     "Host: %s\r\n"
-                                     "Content-length: %d\r\n\r\n"
-                                     JSON_TEMPLATE,
-                                     HTTP_PATH, HTTP_HOST, strlen(JSON_TEMPLATE) + 3, ts, lat, lng);
-	
-	*/
+    LOG_INF("Prepare send buffer:");
     send_data_len = snprintf(send_buf, 2000,
                                      "POST %s HTTP/1.1\r\n"
                                      "Host: %s\r\n\r\n"
                                      JSON_TEMPLATE,
-                                     HTTP_PATH, HTTP_HOST, ts, lat, lng);
+                                     HTTP_PATH, HTTP_HOST, (long)ts, lat, lng);
 	
    
     do {
@@ -801,32 +785,19 @@ struct sockaddr_in local_addr;
         if (num_bytes < 0) {
             LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
         };
+		
 
     } while (num_bytes < 0);
 
-    LOG_INF("\n\rFinished. Closing socket\n");
+	}
+
+
+    LOG_INF("Finished. Closing socket");
     err = close(client_fd);
 
     freeaddrinfo(res);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-///////////////////////////////////////////////////////////////////////////////////////
-
-    ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+  ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
 
 
     if (ret) {
@@ -836,23 +807,53 @@ struct sockaddr_in local_addr;
     }
 
 
-
-
-
+			//k_sleep(K_SECONDS(10));
                 k_sem_give(&lte_connected);
+
+///////////////////////////////////////////////////////////////////////////////////////
+
+
                 break;
 
         case LTE_LC_EVT_RRC_UPDATE:
+				LOG_INF("xLTE_LC_EVT_RRC_UPDATE");
+				break;
         case LTE_LC_EVT_CELL_UPDATE:
-        case LTE_LC_EVT_LTE_MODE_UPDATE:
+				LOG_INF("xLTE_LC_EVT_CELL_UPDATE");
+				break;
+		case LTE_LC_EVT_LTE_MODE_UPDATE:
+			LOG_INF("xLTE_LC_EVT_LTE_MODE_UPDATE"); 
+			k_sleep(K_SECONDS(10));
+			break;
         case LTE_LC_EVT_MODEM_EVENT:
+				LOG_INF("xLTE_LC_EVT_MODEM_EVENT");
                 /* Handle LTE events that are enabled by default. */
                 break;
 
         default:
+				LOG_INF("AUTRE?");
                 break;
         }
+
+ 
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -882,29 +883,47 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	printf("VDOP:           %.01f\n", pvt_data->vdop);
 	printf("TDOP:           %.01f\n", pvt_data->tdop);
 
+
+
+	struct tm tm;
+
+	tm.tm_year = pvt_data->datetime.year - 1900;
+	tm.tm_mon = pvt_data->datetime.month - 1;
+	tm.tm_mday = pvt_data->datetime.day;
+	tm.tm_hour = pvt_data->datetime.hour;
+	tm.tm_min = pvt_data->datetime.minute;
+	tm.tm_sec = pvt_data->datetime.seconds;
+	tm.tm_isdst = 0;
+
+	ts = mktime(&tm);
+	//LOG_INF("Time: %ld", (long)t);	
+
 	lat = pvt_data->latitude;
 	lng = pvt_data->longitude;
 
     int ret;
 
-        ret = lte_lc_connect_async(lte_handler);
-        if (ret) {
-                printk("lte_lc_connect_async, error: %d\n", ret);
-                return 0;
-        }
+	ret = lte_lc_connect_async(lte_handler);
+	if (ret) {
+			printk("lte_lc_connect_async, error: %d\n", ret);
+			return 0;
+	}
 
-        k_sem_take(&lte_connected, K_FOREVER);
+	k_sem_take(&lte_connected, K_FOREVER);
 	
 
 
 
-	LOG_INF("Sleeping for 30 s to avoid the provider to be pissed...");
+	//LOG_INF("Sleeping for 30 s to avoid the provider to be pissed...");
 
-	k_sleep(K_SECONDS(30));
+	k_sleep(K_SECONDS(60));
 
 	LOG_INF("done");
 
 }
+
+
+
 
 int main(void)
 {
@@ -914,11 +933,19 @@ int main(void)
 
 	LOG_INF("Starting GNSS sample");
 
+
+
+
+
 	err = nrf_modem_lib_init();
 	if (err) {
 		LOG_ERR("Modem library initialization failed, error: %d", err);
 		return err;
 	}
+
+
+
+	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_AUTO);
 
 	/* Initialize reference coordinates (if used). */
 	if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
@@ -946,23 +973,6 @@ int main(void)
 	fix_timestamp = k_uptime_get();
 
 	lte_lc_init();
-
-
-	/*
-    int ret;
-
-        ret = lte_lc_connect_async(lte_handler);
-        if (ret) {
-                printk("lte_lc_connect_async, error: %d\n", ret);
-                return 0;
-        }
-
-        k_sem_take(&lte_connected, K_FOREVER);
-	
-
-
-	LOG_INF("done");
-	*/
 
 	
 	for (;;) {
@@ -996,16 +1006,19 @@ int main(void)
 				//	goto handle_nmea;
 				}
 
-				printf("\033[1;1H");
-				printf("\033[2J");
+				//printf("\033[1;1H");
+				//printf("\033[2J");
 				print_satellite_stats(&last_pvt);
 
 				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
 					printf("GNSS operation blocked by LTE\n");
+					//k_sleep(K_SECONDS(30));
 				}
 				if (last_pvt.flags &
 				    NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
 					printf("Insufficient GNSS time windows\n");
+						//k_sleep(K_SECONDS(30));
+
 				}
 				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT) {
 					printf("Sleep period(s) between PVT notifications\n");
