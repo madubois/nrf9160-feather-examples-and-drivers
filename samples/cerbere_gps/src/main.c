@@ -901,22 +901,18 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	lat = pvt_data->latitude;
 	lng = pvt_data->longitude;
 
-    int ret;
+    //int ret;
 
-	ret = lte_lc_connect_async(lte_handler);
-	if (ret) {
-			printk("lte_lc_connect_async, error: %d\n", ret);
-			return 0;
-	}
+	//ret = lte_lc_connect_async(lte_handler);
+	//if (ret) {
+	//		printk("lte_lc_connect_async, error: %d\n", ret);
+	//		return 0;
+	//}
 
-	k_sem_take(&lte_connected, K_FOREVER);
+	//k_sem_take(&lte_connected, K_FOREVER);
 	
 
-
-
-	//LOG_INF("Sleeping for 30 s to avoid the provider to be pissed...");
-
-	k_sleep(K_SECONDS(60));
+	
 
 	LOG_INF("done");
 
