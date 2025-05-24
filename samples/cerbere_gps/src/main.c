@@ -582,41 +582,6 @@ static bool output_paused(void)
 
 
 
-
-
-
-
-
-static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
-{
-	uint8_t tracked   = 0;
-	uint8_t in_fix    = 0;
-	uint8_t unhealthy = 0;
-
-	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; ++i) {
-		if (pvt_data->sv[i].sv > 0) {
-			tracked++;
-
-			if (pvt_data->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
-				in_fix++;
-			}
-
-			if (pvt_data->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_UNHEALTHY) {
-				unhealthy++;
-			}
-		}
-	}
-
-	printf("Tracking: %2d Using: %2d Unhealthy: %d\n", tracked, in_fix, unhealthy);
-}
-
-
-
-
-
-
-
-
 //////////////////////////////////////////
 #include <string.h>
 #include <zephyr/kernel.h>
@@ -768,6 +733,7 @@ struct sockaddr_in local_addr;
     LOG_INF("connect err: %d", err);
 
 
+/** 
 	if (err >= 0) {
 
     LOG_INF("Prepare send buffer:");
@@ -790,7 +756,7 @@ struct sockaddr_in local_addr;
     } while (num_bytes < 0);
 
 	}
-
+*/
 
     LOG_INF("Finished. Closing socket");
     err = close(client_fd);
@@ -806,8 +772,6 @@ struct sockaddr_in local_addr;
         LOG_INF("Disconnected from LTE network");
     }
 
-
-			//k_sleep(K_SECONDS(10));
                 k_sem_give(&lte_connected);
 
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -823,7 +787,6 @@ struct sockaddr_in local_addr;
 				break;
 		case LTE_LC_EVT_LTE_MODE_UPDATE:
 			LOG_INF("xLTE_LC_EVT_LTE_MODE_UPDATE"); 
-			k_sleep(K_SECONDS(10));
 			break;
         case LTE_LC_EVT_MODEM_EVENT:
 				LOG_INF("xLTE_LC_EVT_MODEM_EVENT");
@@ -857,74 +820,6 @@ struct sockaddr_in local_addr;
 
 
 
-
-
-
-static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
-{
-	printf("Latitude:       %.06f\n", pvt_data->latitude);
-	printf("Longitude:      %.06f\n", pvt_data->longitude);
-	printf("Altitude:       %.01f m\n", pvt_data->altitude);
-	printf("Accuracy:       %.01f m\n", pvt_data->accuracy);
-	printf("Speed:          %.01f m/s\n", pvt_data->speed);
-	printf("Speed accuracy: %.01f m/s\n", pvt_data->speed_accuracy);
-	printf("Heading:        %.01f deg\n", pvt_data->heading);
-	printf("Date:           %04u-%02u-%02u\n",
-	       pvt_data->datetime.year,
-	       pvt_data->datetime.month,
-	       pvt_data->datetime.day);
-	printf("Time (UTC):     %02u:%02u:%02u.%03u\n",
-	       pvt_data->datetime.hour,
-	       pvt_data->datetime.minute,
-	       pvt_data->datetime.seconds,
-	       pvt_data->datetime.ms);
-	printf("PDOP:           %.01f\n", pvt_data->pdop);
-	printf("HDOP:           %.01f\n", pvt_data->hdop);
-	printf("VDOP:           %.01f\n", pvt_data->vdop);
-	printf("TDOP:           %.01f\n", pvt_data->tdop);
-
-
-
-	struct tm tm;
-
-	tm.tm_year = pvt_data->datetime.year - 1900;
-	tm.tm_mon = pvt_data->datetime.month - 1;
-	tm.tm_mday = pvt_data->datetime.day;
-	tm.tm_hour = pvt_data->datetime.hour;
-	tm.tm_min = pvt_data->datetime.minute;
-	tm.tm_sec = pvt_data->datetime.seconds;
-	tm.tm_isdst = 0;
-
-	ts = mktime(&tm);
-	//LOG_INF("Time: %ld", (long)t);	
-
-	lat = pvt_data->latitude;
-	lng = pvt_data->longitude;
-
-    int ret;
-
-	ret = lte_lc_connect_async(lte_handler);
-	if (ret) {
-			printk("lte_lc_connect_async, error: %d\n", ret);
-			return 0;
-	}
-
-	k_sem_take(&lte_connected, K_FOREVER);
-	
-
-
-
-	//LOG_INF("Sleeping for 30 s to avoid the provider to be pissed...");
-
-	k_sleep(K_SECONDS(60));
-
-	LOG_INF("done");
-
-}
-
-
-
-
 int main(void)
 {
 	int err;
@@ -932,11 +827,6 @@ int main(void)
 	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
 
 	LOG_INF("Starting GNSS sample");
-
-
-
-
-
 	err = nrf_modem_lib_init();
 	if (err) {
 		LOG_ERR("Modem library initialization failed, error: %d", err);
@@ -945,120 +835,440 @@ int main(void)
 
 
 
-	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_AUTO);
+	//lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_AUTO);
 
 	/* Initialize reference coordinates (if used). */
-	if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
-	    sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) > 1) {
-		ref_used = true;
-		ref_latitude = atof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE);
-		ref_longitude = atof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE);
-	}
+	//if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
+	//    sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) > 1) {
+	//	ref_used = true;
+	//	ref_latitude = atof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE);
+	//	ref_longitude = atof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE);
+	//}
 
-	if (modem_init() != 0) {
-		LOG_ERR("Failed to initialize modem");
-		return -1;
-	}
+	//if (modem_init() != 0) {
+	//	LOG_ERR("Failed to initialize modem");
+	//	return -1;
+	//}
 
-	if (sample_init() != 0) {
-		LOG_ERR("Failed to initialize sample");
-		return -1;
-	}
+	//if (sample_init() != 0) {
+	//	LOG_ERR("Failed to initialize sample");
+	//	return -1;
+	//}
 
-	if (gnss_init_and_start() != 0) {
-		LOG_ERR("Failed to initialize and start GNSS");
-		return -1;
-	}
+	//if (gnss_init_and_start() != 0) {
+	//	LOG_ERR("Failed to initialize and start GNSS");
+	//	return -1;
+	//}
 
-	fix_timestamp = k_uptime_get();
+	//fix_timestamp = k_uptime_get();
 
 	lte_lc_init();
 
 	
-	for (;;) {
-		(void)k_poll(events, 2, K_FOREVER);
 
-		if (events[0].state == K_POLL_STATE_SEM_AVAILABLE &&
-		    k_sem_take(events[0].sem, K_NO_WAIT) == 0) {
-			/* New PVT data available */
 
-			if (IS_ENABLED(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)) {
-				/* TTFF test mode. */
+	int ret;
 
-				/* Calculate the time GNSS has been blocked by LTE. */
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-					time_blocked++;
-				}
-			} else if (IS_ENABLED(CONFIG_GNSS_SAMPLE_NMEA_ONLY)) {
-				/* NMEA-only output mode. */
+	//ret = lte_lc_connect_async(lte_handler);
+	//if (ret) {
+	//		printk("lte_lc_connect_async, error: %d\n", ret);
+	//		return 0;
+	//}
 
-				if (output_paused()) {
-				//	goto handle_nmea;
-				}
 
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-					print_distance_from_reference(&last_pvt);
-				}
-			} else {
-				/* PVT and NMEA output mode. */
 
-				if (output_paused()) {
-				//	goto handle_nmea;
-				}
 
-				//printf("\033[1;1H");
-				//printf("\033[2J");
-				print_satellite_stats(&last_pvt);
 
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-					printf("GNSS operation blocked by LTE\n");
-					//k_sleep(K_SECONDS(30));
-				}
-				if (last_pvt.flags &
-				    NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
-					printf("Insufficient GNSS time windows\n");
-						//k_sleep(K_SECONDS(30));
 
-				}
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT) {
-					printf("Sleep period(s) between PVT notifications\n");
-				}
-				printf("-----------------------------------\n");
 
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-					fix_timestamp = k_uptime_get();
-					print_fix_data(&last_pvt);
-					print_distance_from_reference(&last_pvt);
-				} else {
-					printf("Seconds since last fix: %d\n",
-					       (uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
-					cnt++;
-					printf("Searching [%c]\n", update_indicator[cnt%4]);
-				}
 
-				printf("\nNMEA strings:\n\n");
-			}
-		}
 
-handle_nmea:
-//		printf("\nousps:\n\n");
 
-//		if (events[1].state == K_POLL_STATE_MSGQ_DATA_AVAILABLE &&
-//		    k_msgq_get(events[1].msgq, &nmea_data, K_NO_WAIT) == 0) {
-//			/* New NMEA data available */
 
-//			if (!output_paused()) {
-//				printf("%s", nmea_data->nmea_str);
-//			}
-//			k_free(nmea_data);
-//		}
 
-//		events[0].state = K_POLL_STATE_NOT_READY;
-//		events[1].state = K_POLL_STATE_NOT_READY;
+
+
+
+
+
+
+
+
+
+
+
+
+
+	ret = lte_lc_connect();
+	if (ret) {
+		printk("lte_lc_connect, error: %d\n", ret);
+		return 0;
+	}
+
+	printk("lte_lc_connect, ret: %d\n", ret);
+
+
+
+
+
+
+
+
+
+
+
+	struct sockaddr_in local_addr;
+    struct addrinfo *res;
+    int send_data_len;
+    int num_bytes;
+    int mtu_size = MAX_MTU_SIZE;
+    //char send_buf[SEND_BUF_SIZE];
+   
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(0);
+    local_addr.sin_addr.s_addr = 0;
+
+
+	struct addrinfo hints = {
+		.ai_family = AF_INET,       //1
+		.ai_socktype = SOCK_DGRAM,  //2
+        .ai_next = NULL,
+        .ai_addr = NULL,
+        .ai_protocol = 0   //any protocol
+	};
+
+     err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
+    LOG_INF("getaddrinfo err: %d", err);
+	
+    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+   
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d", err);
+
+
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d", err);
+
+
+
+	long ts = 0;
+	float lat = 0;
+	float lng = 0;
+
+
+
+	if (err >= 0) {
+
+    LOG_INF("Prepare send buffer:");
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, (long)ts, lat, lng);
+	
+   
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+	}
+
+	LOG_INF("Finished. Closing socket  1");
+	err = close(client_fd);
+
+	//freeaddrinfo(res);
+
+
+
+
+
+
+
+
+
+
+char response[64];
+ err = nrf_modem_at_cmd(response, sizeof(response), "AT+CGPADDR");
+if (err == 0) {
+    printk("AT+CGPADDR response: %s\n", response);
+}
+
+
+
+
+	k_sleep(K_SECONDS(10));
+
+
+
+
+
+
+
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d", err);
+
+
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d", err);
+
+
+
+	 ts = 0;
+	 lat = 0;
+	 lng = 0;
+
+
+
+	if (err >= 0) {
+
+    LOG_INF("Prepare send buffer:");
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, (long)ts, lat, lng);
+	
+   
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+	}
+
+	LOG_INF("Finished. Closing socket   2");
+	err = close(client_fd);
+
+
+
+
+ err = nrf_modem_at_cmd(response, sizeof(response), "AT+CGPADDR");
+if (err == 0) {
+    printk("AT+CGPADDR response: %s\n", response);
+}
+
+
+
+
+
+//err = nrf_modem_at_cmd(response, sizeof(response), 'AT+CPSMS=1,,,"00101000","00000001"');
+
+
+	
+
+	int n =0;
+
+	while (n<10) {
+		k_sleep(K_SECONDS(1));
+		err = nrf_modem_at_cmd(response, sizeof(response), "AT+CPSMS?");
+if (err == 0) {
+    printk("%d AT+CPSMS? response: %s\n",n, response);
+}
+
+n++;
 	}
 
 
-				printf("\noups:\n\n");
+printk("\n\n\n\n");
+
+
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d", err);
+
+
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d", err);
+
+
+
+	 ts = 0;
+	 lat = 0;
+	 lng = 0;
+
+
+
+	if (err >= 0) {
+
+    LOG_INF("Prepare send buffer:");
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, (long)ts, lat, lng);
+	
+   
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+	}
+
+	LOG_INF("Finished. Closing socket");
+	err = close(client_fd);
+
+
+ err = nrf_modem_at_cmd(response, sizeof(response), "AT+CGPADDR");
+if (err == 0) {
+    printk("3 AT+CGPADDR response: %s\n", response);
+}
+
+
+
+		err = nrf_modem_at_cmd(response, sizeof(response), "AT+CPSMS?");
+if (err == 0) {
+    printk("3 AT+CPSMS? response: %s\n", response);
+}
+
+
+
+
+n=0;
+
+	while (n<50) {
+		k_sleep(K_SECONDS(1));
+		err = nrf_modem_at_cmd(response, sizeof(response), "AT+CSCON?");
+if (err == 0) {
+    printk("%d AT+CSCON? response: %s\n",n, response);
+
+	if(n==25){
+		err = nrf_modem_at_cmd(response, sizeof(response), "AT+CSCON=0");
+	}
+}
+
+n++;
+	}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+printk("\n\n\n\n");
+
+
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d", err);
+
+
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d", err);
+
+
+
+	 ts = 0;
+	 lat = 0;
+	 lng = 0;
+
+
+
+	if (err >= 0) {
+
+    LOG_INF("Prepare send buffer:");
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, (long)ts, lat, lng);
+	
+   
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+	}
+
+	LOG_INF("Finished. Closing socket");
+	err = close(client_fd);
+
+
+ err = nrf_modem_at_cmd(response, sizeof(response), "AT+CGPADDR");
+if (err == 0) {
+    printk("4 AT+CGPADDR response: %s\n", response);
+}
+
+
+
+		err = nrf_modem_at_cmd(response, sizeof(response), "AT+CPSMS?");
+if (err == 0) {
+    printk("4 AT+CPSMS? response: %s\n", response);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+	//k_sem_take(&lte_connected, K_FOREVER);
+
+
+
+
+	k_sleep(K_SECONDS(1000));
+
 
 	return 0;
 }
