@@ -1087,7 +1087,7 @@ int main(void)
 
 
 
-	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_AUTO);
+	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
 
 	/* Initialize reference coordinates (if used). */
 	if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
