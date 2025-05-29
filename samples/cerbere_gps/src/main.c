@@ -696,9 +696,15 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
 
 
 
-float lat=0;
-float lng=0;
-time_t ts=0;
+//float lat=0;
+//float lng=0;
+//time_t ts=0;
+
+
+int position=0;
+float lat[5];
+float lng[5];
+time_t ts[5];
 
 
 
@@ -862,6 +868,8 @@ struct sockaddr_in local_addr;
 
 static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
+
+	/*
 	printf("Latitude:       %.06f\n", pvt_data->latitude);
 	printf("Longitude:      %.06f\n", pvt_data->longitude);
 	printf("Altitude:       %.01f m\n", pvt_data->altitude);
@@ -882,7 +890,7 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	printf("HDOP:           %.01f\n", pvt_data->hdop);
 	printf("VDOP:           %.01f\n", pvt_data->vdop);
 	printf("TDOP:           %.01f\n", pvt_data->tdop);
-
+*/
 
 
 	struct tm tm;
@@ -895,11 +903,149 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	tm.tm_sec = pvt_data->datetime.seconds;
 	tm.tm_isdst = 0;
 
-	ts = mktime(&tm);
+
+
+		if((long)mktime(&tm) % 10 == 0){
+					ts[position] = mktime(&tm);
+					lat[position] = pvt_data->latitude;
+					lng[position] = pvt_data->longitude;
+					position++;
+		}
+
+
+		if(position >= 5){
+			position = 0;
+
+			lte_lc_connect();
+
+
+
+
+
+
+struct sockaddr_in local_addr;
+    struct addrinfo *res;
+    int send_data_len;
+    int num_bytes;
+    int mtu_size = MAX_MTU_SIZE;
+    //char send_buf[SEND_BUF_SIZE];
+   
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(0);
+    local_addr.sin_addr.s_addr = 0;
+
+
+	struct addrinfo hints = {
+		.ai_family = AF_INET,       //1
+		.ai_socktype = SOCK_DGRAM,  //2
+        .ai_next = NULL,
+        .ai_addr = NULL,
+        .ai_protocol = 0   //any protocol
+	};
+
+    int err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
+    LOG_INF("getaddrinfo err: %d", err);
+	
+    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+   
+
+
+	for(int i =0;i<5;i++){
+
+
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d", err);
+
+
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d", err);
+
+
+	if (err >= 0) {
+
+    LOG_INF("Prepare send buffer:");
+    send_data_len = snprintf(send_buf, 2000,
+                                     "POST %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n"
+                                     JSON_TEMPLATE,
+                                     HTTP_PATH, HTTP_HOST, (long)ts[i], lat[i], lng[i]);
+	
+   
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+	}
+
+
+    LOG_INF("Finished. Closing socket");
+    err = close(client_fd);
+
+
+
+
+
+}
+
+
+
+
+
+
+
+
+
+    freeaddrinfo(res);
+int ret;
+  ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+
+
+    if (ret) {
+        LOG_ERR("Failed to disconnect from LTE network");
+    } else {
+        LOG_INF("Disconnected from LTE network");
+    }
+
+
+
+
+
+
+
+
+		}
+
+
+
+
+
+
+
+
+
+
+	//ts = mktime(&tm);
 	//LOG_INF("Time: %ld", (long)t);	
 
-	lat = pvt_data->latitude;
-	lng = pvt_data->longitude;
+	//lat = pvt_data->latitude;
+	//lng = pvt_data->longitude;
+
+		LOG_INF("Time: %ld", (long)ts[position]);
+
+
+
+
 
     //int ret;
 
