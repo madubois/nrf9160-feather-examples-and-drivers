@@ -693,171 +693,10 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
 
 
 
-
-
-
-//float lat=0;
-//float lng=0;
-//time_t ts=0;
-
-
 int position=0;
 float lat[5];
 float lng[5];
 time_t ts[5];
-
-
-
-
-
-K_SEM_DEFINE(lte_connected, 0, 1);
-
-static void lte_handler(const struct lte_lc_evt *const evt)
-{
-				//k_sleep(K_SECONDS(10));
-
-		int ret;
-
-        switch (evt->type) {
-        case LTE_LC_EVT_NW_REG_STATUS:
-                if (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_HOME &&
-                    evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING) {
-                        break;
-                }
-
-                printk("Connected to: %s network",
-                       evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ? "home" : "roaming");
-
-
-
-
-	LOG_INF("Connected...");
-
-
-/////////////////////////////////////////////////////////////////////////////////////
-
-
-struct sockaddr_in local_addr;
-    struct addrinfo *res;
-    int send_data_len;
-    int num_bytes;
-    int mtu_size = MAX_MTU_SIZE;
-    //char send_buf[SEND_BUF_SIZE];
-   
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_port = htons(0);
-    local_addr.sin_addr.s_addr = 0;
-
-
-	struct addrinfo hints = {
-		.ai_family = AF_INET,       //1
-		.ai_socktype = SOCK_DGRAM,  //2
-        .ai_next = NULL,
-        .ai_addr = NULL,
-        .ai_protocol = 0   //any protocol
-	};
-
-    int err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
-    LOG_INF("getaddrinfo err: %d", err);
-	
-    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
-   
-
-    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-    LOG_INF("client_fd: %d", client_fd);
-    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
-    LOG_INF("bind err: %d", err);
-
-
-    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
-    LOG_INF("connect err: %d", err);
-
-
-	if (err >= 0) {
-
-    LOG_INF("Prepare send buffer:");
-    send_data_len = snprintf(send_buf, 2000,
-                                     "POST %s HTTP/1.1\r\n"
-                                     "Host: %s\r\n\r\n"
-                                     JSON_TEMPLATE,
-                                     HTTP_PATH, HTTP_HOST, (long)ts, lat, lng);
-	
-   
-    do {
-        num_bytes =
-        blocking_send(client_fd, send_buf, send_data_len, 0);
-       
-        if (num_bytes < 0) {
-            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
-        };
-		
-
-    } while (num_bytes < 0);
-
-	}
-
-
-    LOG_INF("Finished. Closing socket");
-    err = close(client_fd);
-
-    freeaddrinfo(res);
-
-  ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
-
-
-    if (ret) {
-        LOG_ERR("Failed to disconnect from LTE network");
-    } else {
-        LOG_INF("Disconnected from LTE network");
-    }
-
-
-			//k_sleep(K_SECONDS(10));
-                k_sem_give(&lte_connected);
-
-///////////////////////////////////////////////////////////////////////////////////////
-
-
-                break;
-
-        case LTE_LC_EVT_RRC_UPDATE:
-				LOG_INF("xLTE_LC_EVT_RRC_UPDATE");
-				break;
-        case LTE_LC_EVT_CELL_UPDATE:
-				LOG_INF("xLTE_LC_EVT_CELL_UPDATE");
-				break;
-		case LTE_LC_EVT_LTE_MODE_UPDATE:
-			LOG_INF("xLTE_LC_EVT_LTE_MODE_UPDATE"); 
-			k_sleep(K_SECONDS(10));
-			break;
-        case LTE_LC_EVT_MODEM_EVENT:
-				LOG_INF("xLTE_LC_EVT_MODEM_EVENT");
-                /* Handle LTE events that are enabled by default. */
-                break;
-
-        default:
-				LOG_INF("AUTRE?");
-                break;
-        }
-
- 
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -1018,47 +857,10 @@ int ret;
     }
 
 
-
-
-
-
-
-
 		}
 
 
-
-
-
-
-
-
-
-
-	//ts = mktime(&tm);
-	//LOG_INF("Time: %ld", (long)t);	
-
-	//lat = pvt_data->latitude;
-	//lng = pvt_data->longitude;
-
-		LOG_INF("Time: %ld", (long)ts[position]);
-
-
-
-
-
-    //int ret;
-
-	//ret = lte_lc_connect_async(lte_handler);
-	//if (ret) {
-	//		printk("lte_lc_connect_async, error: %d\n", ret);
-	//		return 0;
-	//}
-
-	//k_sem_take(&lte_connected, K_FOREVER);
-	
-
-	
+		LOG_INF("Time: %ld", (long)ts[position]);	
 
 	LOG_INF("done");
 
@@ -1198,9 +1000,6 @@ handle_nmea:
 //		events[0].state = K_POLL_STATE_NOT_READY;
 //		events[1].state = K_POLL_STATE_NOT_READY;
 	}
-
-
-				printf("\noups:\n\n");
 
 	return 0;
 }
