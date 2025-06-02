@@ -631,6 +631,7 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 
 #define HTTP_HOST "serveur.duckdns.org"
 #define HTTP_PATH "/coord2"
+#define HTTP_PATH_LONG "/coords"
 #define HTTP_PORT 8545
 #define MAX_MTU_SIZE     2000
 #define RECV_BUF_SIZE    2048
@@ -642,7 +643,7 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 #define JSON_TEMPLATE "%ld,%.9f,%.9f"
 
 
-
+#define JSON_TEMPLATE_LONG "%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f"
 
 
 
@@ -789,7 +790,7 @@ struct sockaddr_in local_addr;
    
 
 
-	for(int i =0;i<5;i++){
+	//for(int i =0;i<5;i++){
 
 
 
@@ -807,13 +808,26 @@ struct sockaddr_in local_addr;
 	if (err >= 0) {
 
     LOG_INF("Prepare send buffer:");
-    send_data_len = snprintf(send_buf, 2000,
-                                     "POST %s HTTP/1.1\r\n"
-                                     "Host: %s\r\n\r\n"
-                                     JSON_TEMPLATE,
-                                     HTTP_PATH, HTTP_HOST, (long)ts[i], lat[i], lng[i]);
+    //send_data_len = snprintf(send_buf, 2000,
+    //                                 "POST %s HTTP/1.1\r\n"
+    //                                 "Host: %s\r\n\r\n"
+    //                                 JSON_TEMPLATE,
+    //                                 HTTP_PATH, HTTP_HOST, (long)ts[i], lat[i], lng[i]);
 	
-   
+	
+	send_data_len = snprintf(send_buf, 2000,
+									"POST %s HTTP/1.1\r\n"
+                                    "Host: %s\r\n\r\n"
+									JSON_TEMPLATE_LONG,
+									HTTP_PATH_LONG, HTTP_HOST,
+									(long)ts[0], lat[0], lng[0],
+									(long)ts[1], lat[1], lng[1],
+									(long)ts[2], lat[2], lng[2],
+									(long)ts[3], lat[3], lng[3],
+									(long)ts[4], lat[4], lng[4]);
+
+
+
     do {
         num_bytes =
         blocking_send(client_fd, send_buf, send_data_len, 0);
@@ -825,7 +839,7 @@ struct sockaddr_in local_addr;
 
     } while (num_bytes < 0);
 
-	}
+	//}
 
 
     LOG_INF("Finished. Closing socket");
