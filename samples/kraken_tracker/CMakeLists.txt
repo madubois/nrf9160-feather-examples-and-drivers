@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.13.1)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(gps_socket_sample)
 
+
 zephyr_library_sources(src/main.c)
 zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_NRF_CLOUD ${NRF_DIR}/samples/nrf9160/gnss/src/assistance.c)
 zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_SUPL ${NRF_DIR}/samples/nrf9160/gnss/src/assistance_supl.c)
@@ -21,3 +22,5 @@ zephyr_library_sources_ifdef(
   CONFIG_SUPL_CLIENT_LIB
   ${NRF_DIR}/samples/nrf9160/gps/src/supl_support.c
 )
+
+
