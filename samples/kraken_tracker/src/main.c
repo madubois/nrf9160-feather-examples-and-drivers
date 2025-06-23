@@ -101,8 +101,8 @@ static void ssd1306_init(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0x14);
     ssd1306_write_cmd(i2c_dev, 0x20); // Set memory addressing mode
     ssd1306_write_cmd(i2c_dev, 0x00); // Horizontal addressing mode
-    ssd1306_write_cmd(i2c_dev, 0xA1); // Set segment re-map 0 to 127
-    ssd1306_write_cmd(i2c_dev, 0xC8); // Set COM output scan direction remapped
+    ssd1306_write_cmd(i2c_dev, 0xA0); // Set segment re-map 0 to 127
+    ssd1306_write_cmd(i2c_dev, 0xC0); // Set COM output scan direction remapped
     ssd1306_write_cmd(i2c_dev, 0xDA); // Set COM pins hardware configuration
     ssd1306_write_cmd(i2c_dev, 0x12); // 0x02 pour 128x32 (voir datasheet)
     ssd1306_write_cmd(i2c_dev, 0x81); // Set contrast control
