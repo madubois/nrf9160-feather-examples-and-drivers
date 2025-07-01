@@ -223,14 +223,16 @@ static const uint8_t font_5x7[96][5] = {
 };
 
 
-void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t y) {
+void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t y, bool erase) {
 
+
+	if(erase){
     // Effacer la zone 5x7 avant de dessiner le caractère
     for (uint8_t col = 0; col < 5; col++) {
         for (uint8_t row = 0; row < 7; row++) {
             eteindre_pixel(i2c_dev, x + col, y + row);
         }
-    }
+    }}
 
 
 
@@ -922,11 +924,15 @@ int targets_count = 0;
 
 
 
+uint8_t last_tracked = 0;
+uint8_t last_in_fix = 0;
+uint8_t last_unhealthy = 0;
 
 
 
-
-
+uint8_t gps_tracking = 0;
+uint8_t gps_using = 0;
+uint8_t gps_unk = 0;
 
 
 static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
@@ -949,97 +955,28 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 		}
 	}
 
-	LOG_INF("Tracking: %2d Using: %2d Unhealthy: %d\n", tracked, in_fix, unhealthy);
-
-
-
-				uint8_t x = 0, y = 0;
-
-char line[128];
-
-
-snprintf(line, sizeof(line), "T: %2d U: %2d Un: %d", tracked, in_fix, unhealthy);
-
-
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-}
-
-
-
-
-static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
-{
-
-	
-	printf("Latitude:       %.06f\n", pvt_data->latitude);
-	printf("Longitude:      %.06f\n", pvt_data->longitude);
-	printf("Altitude:       %.01f m\n", pvt_data->altitude);
-	printf("Accuracy:       %.01f m\n", pvt_data->accuracy);
-	printf("Speed:          %.01f m/s\n", pvt_data->speed);
-	printf("Speed accuracy: %.01f m/s\n", pvt_data->speed_accuracy);
-	printf("Heading:        %.01f deg\n", pvt_data->heading);
-	printf("Date:           %04u-%02u-%02u\n",
-	       pvt_data->datetime.year,
-	       pvt_data->datetime.month,
-	       pvt_data->datetime.day);
-	printf("Time (UTC):     %02u:%02u:%02u.%03u\n",
-	       pvt_data->datetime.hour,
-	       pvt_data->datetime.minute,
-	       pvt_data->datetime.seconds,
-	       pvt_data->datetime.ms);
-	printf("PDOP:           %.01f\n", pvt_data->pdop);
-	printf("HDOP:           %.01f\n", pvt_data->hdop);
-	printf("VDOP:           %.01f\n", pvt_data->vdop);
-	printf("TDOP:           %.01f\n", pvt_data->tdop);
-
-
-		double last_latitude = pvt_data->latitude;
-		double last_longitude = pvt_data->longitude;
-
-
-	uint8_t x = 0, y = 32;
-	char linex[128];
-
-
-
-	for(int i=0;i<targets_count;i++){
-
-		int heading, distance;
-
-		calcul_cap_distance_int(last_latitude, last_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
-
-
-		//%6d DEG position 3 + %3d
-		//%19d position 15 + %4d
-		snprintf(linex, sizeof(linex), "%1d: %3d DEG  |  %4d m", i+1, heading, distance);
-
-		for (const char *p = linex; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y);
-		x += 6;
-
-	}
-
-		y+= 8;
-		x = 0;
-	}
-
-
-	
-
-
-
-
-
+	gps_tracking = tracked;
+	gps_using = in_fix;
+	gps_unk = unhealthy;
 
 
 }
 
+double last_latitude = 0;
+double last_longitude = 0;
 
+double ref_latitude2 = 0;
+double ref_longitude2 = 0;
+
+
+int lte_wait = 0;
+int lte_quota = 10;
+
+
+volatile int position=0;
+float lat[5];
+float lng[5];
+time_t ts[5];
 
 
 #include <zephyr/net/socket.h>
@@ -1047,20 +984,22 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 
 #define HTTP_HOST "plongee.duckdns.org"
 #define HTTP_PATH "/targets"
+#define HTTP_PATH_LONG "/coords"
 #define HTTP_PORT 8545
 #define MAX_MTU_SIZE     2000
 #define RECV_BUF_SIZE    2048
 #define SEND_BUF_SIZE    MAX_MTU_SIZE
 
-#define TEST_STRING "T"
-
-//#define JSON_TEMPLATE "{\"Angle X\": %d\"Angle Y\": %d\"Angle Z\": %d}"
 #define JSON_TEMPLATE "%ld,%.9f,%.9f"
-
-
 #define JSON_TEMPLATE_LONG "%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f"
 
+
     char send_buf[2000];
+
+bool gps_state = 0;
+bool lte_state = 0;
+
+
 
 
 
@@ -1095,8 +1034,155 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
 }
 
 
+#include <zephyr/kernel.h>
+
+struct k_mutex lte_mutex;
+
+void send_to_cloud(){
 
 
+
+
+			lte_lc_connect();
+
+						LOG_INF("5");
+
+struct sockaddr_in local_addr;
+    struct addrinfo *res;
+    int send_data_len;
+    int num_bytes;
+    int mtu_size = MAX_MTU_SIZE;
+    //char send_buf[SEND_BUF_SIZE];
+   
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(0);
+    local_addr.sin_addr.s_addr = 0;
+
+
+	struct addrinfo hints = {
+		.ai_family = AF_INET,       //1
+		.ai_socktype = SOCK_DGRAM,  //2
+        .ai_next = NULL,
+        .ai_addr = NULL,
+        .ai_protocol = 0   //any protocol
+	};
+
+    int err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
+    LOG_INF("getaddrinfo err: %d", err);
+	
+    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+   
+
+
+	//for(int i =0;i<5;i++){
+
+
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    LOG_INF("client_fd: %d", client_fd);
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    LOG_INF("bind err: %d", err);
+
+
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+    LOG_INF("connect err: %d", err);
+
+
+	if (err >= 0) {
+
+    LOG_INF("Prepare send buffer:");
+	
+	
+	send_data_len = snprintf(send_buf, 2000,
+									"POST %s HTTP/1.1\r\n"
+                                    "Host: %s\r\n\r\n"
+									JSON_TEMPLATE_LONG,
+									HTTP_PATH_LONG, HTTP_HOST,
+									(long)ts[0], lat[0], lng[0],
+									(long)ts[1], lat[1], lng[1],
+									(long)ts[2], lat[2], lng[2],
+									(long)ts[3], lat[3], lng[3],
+									(long)ts[4], lat[4], lng[4]);
+
+
+
+    do {
+        num_bytes =
+        blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+
+    LOG_INF("Finished. Closing socket");
+    err = close(client_fd);
+
+}
+
+    freeaddrinfo(res);
+int ret;
+  ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+
+
+    if (ret) {
+        LOG_ERR("Failed to disconnect from LTE network");
+    } else {
+        LOG_INF("Disconnected from LTE network");
+    }
+
+
+}
+
+time_t timestamp;
+
+void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
+{
+/*
+	
+	printf("Latitude:       %.06f\n", pvt_data->latitude);
+	printf("Longitude:      %.06f\n", pvt_data->longitude);
+	printf("Altitude:       %.01f m\n", pvt_data->altitude);
+	printf("Accuracy:       %.01f m\n", pvt_data->accuracy);
+	printf("Speed:          %.01f m/s\n", pvt_data->speed);
+	printf("Speed accuracy: %.01f m/s\n", pvt_data->speed_accuracy);
+	printf("Heading:        %.01f deg\n", pvt_data->heading);
+	printf("Date:           %04u-%02u-%02u\n",
+	       pvt_data->datetime.year,
+	       pvt_data->datetime.month,
+	       pvt_data->datetime.day);
+	printf("Time (UTC):     %02u:%02u:%02u.%03u\n",
+	       pvt_data->datetime.hour,
+	       pvt_data->datetime.minute,
+	       pvt_data->datetime.seconds,
+	       pvt_data->datetime.ms);
+	printf("PDOP:           %.01f\n", pvt_data->pdop);
+	printf("HDOP:           %.01f\n", pvt_data->hdop);
+	printf("VDOP:           %.01f\n", pvt_data->vdop);
+	printf("TDOP:           %.01f\n", pvt_data->tdop);
+*/
+
+	struct tm tm;
+
+	tm.tm_year = pvt_data->datetime.year - 1900;
+	tm.tm_mon = pvt_data->datetime.month - 1;
+	tm.tm_mday = pvt_data->datetime.day;
+	tm.tm_hour = pvt_data->datetime.hour;
+	tm.tm_min = pvt_data->datetime.minute;
+	tm.tm_sec = pvt_data->datetime.seconds;
+	tm.tm_isdst = 0;
+
+
+		timestamp = mktime(&tm);
+
+		last_latitude = pvt_data->latitude;
+		last_longitude = pvt_data->longitude;
+
+		}
 
 void initial_connexion(){
 
@@ -1109,10 +1195,6 @@ void initial_connexion(){
 		}
 
 		LOG_INF("Connected to LTE network");
-
-
-
-
 
 	struct sockaddr_in local_addr;
     struct addrinfo *res;
@@ -1155,12 +1237,12 @@ void initial_connexion(){
     LOG_INF("Prepare send buffer:");
 
 	
-		uint8_t x = 0, y = 0;
+		uint8_t x = 0, y = 8;
 
 		char line[128];
 		snprintf(line,sizeof(line),"Connecting...");
 		for (const char *p = line; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y);
+			dessiner_caractere(i2c_dev, *p, x, y,1);
 			x += 6;
 
 		}
@@ -1169,15 +1251,147 @@ void initial_connexion(){
 
 	send_data_len = snprintf(send_buf, 2000,
                                      "GET %s HTTP/1.1\r\n"
-                                     "Host: %s\r\n\r\n"
-                                     JSON_TEMPLATE,
-                                     HTTP_PATH, HTTP_HOST, 0, 0, 0);
+                                     "Host: %s\r\n\r\n",
+                                     HTTP_PATH, HTTP_HOST);
 
 
 
     do {
         num_bytes =
         blocking_send(client_fd, send_buf, send_data_len, 0);
+       
+        if (num_bytes < 0) {
+            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
+        };
+		
+
+    } while (num_bytes < 0);
+
+	char recv_buf[RECV_BUF_SIZE] = {0};
+	int tot_num_bytes = 0;
+
+	do {
+		/* TODO: make a proper timeout *
+		 * Current solution will just hang 
+		 * until remote side closes connection */
+		num_bytes = recv(client_fd, recv_buf, RECV_BUF_SIZE, 0);
+		tot_num_bytes += num_bytes;
+                LOG_INF("total number of bytes: %d\n", tot_num_bytes);
+                LOG_INF("num bytes: %d\n", num_bytes);
+		if (num_bytes < 0) {
+			LOG_INF("\nrecv errno: %d\n", errno);
+			break;
+		}
+		//LOG_INF("%s\n", recv_buf);
+	} while (num_bytes > 0);
+
+
+    double values[10];                       // Tableau pour stocker les doubles
+    size_t count = 0;
+
+
+    char *token = strtok(recv_buf, ",");
+    while (token != NULL && count < 10) {
+        values[count] = strtod(token, NULL);  // Conversion vers double
+        count++;
+        token = strtok(NULL, ",");
+    }
+
+	targets_count = (count/2);
+
+		x = 0;
+		y = 16;
+
+		snprintf(line, sizeof(line),"%d targets",targets_count);
+		for (const char *p = line; *p; p++) {
+			dessiner_caractere(i2c_dev, *p, x, y,1);
+			x += 6;
+
+		}
+
+    // Afficher les résultats
+    for (size_t i = 0; i < targets_count*2; i++) {
+		targets[i] = values[i];
+    }
+
+    LOG_INF("Finished. Closing socket");
+    err = close(client_fd);
+
+}
+
+    freeaddrinfo(res);
+	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+	lte_state = 0;
+
+}
+
+
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/sys/crc.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/dfu/flash_img.h>
+
+void flash_firmware(){
+
+	int err;
+
+	lte_lc_connect();
+		if (err) {
+			LOG_ERR("Failed to connect to LTE network, error: %d", err);
+			return err;
+		}
+
+		LOG_INF("Connected to LTE network");
+
+		
+
+	struct flash_img_context fic;
+
+	struct sockaddr_in local_addr;
+    struct addrinfo *res;
+    int send_data_len;
+    int num_bytes;
+    int mtu_size = MAX_MTU_SIZE;
+   
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(0);
+    local_addr.sin_addr.s_addr = 0;
+
+
+	struct addrinfo hints = {
+		.ai_family = AF_INET,       //1
+		.ai_socktype = SOCK_DGRAM,  //2
+        .ai_next = NULL,
+        .ai_addr = NULL,
+        .ai_protocol = 0   //any protocol
+	};
+
+
+
+	flash_img_init_id(&fic, PM_MCUBOOT_SECONDARY_ID); // Or appropriate slot ID
+	boot_erase_img_bank(PM_MCUBOOT_SECONDARY_ID);
+
+	
+    err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);	
+    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
+    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+
+	if (err >= 0) {
+	
+	send_data_len = snprintf(send_buf, 2000,
+                                     "GET %s HTTP/1.1\r\n"
+                                     "Host: %s\r\n\r\n",
+                                     "/firmware", HTTP_HOST);
+
+
+
+    do {
+        num_bytes = blocking_send(client_fd, send_buf, send_data_len, 0);
        
         if (num_bytes < 0) {
             LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
@@ -1197,106 +1411,378 @@ void initial_connexion(){
 		tot_num_bytes += num_bytes;
                 LOG_INF("total number of bytes: %d\n", tot_num_bytes);
                 LOG_INF("num bytes: %d\n", num_bytes);
+
+
+		err = flash_img_buffered_write(&fic, recv_buf, num_bytes, false);
+        if (err) {
+            printk("Erreur écriture flash: %d\n", err);
+            break;
+        }
+		
+				
 		if (num_bytes < 0) {
 			LOG_INF("\nrecv errno: %d\n", errno);
 			break;
 		}
-		LOG_INF("%s\n", recv_buf);
 	} while (num_bytes > 0);
 
-
-    double values[10];                       // Tableau pour stocker les doubles
-    size_t count = 0;
+	}
 
 
-    char *token = strtok(recv_buf, ",");
-    while (token != NULL && count < 10) {
-        values[count] = strtod(token, NULL);  // Conversion vers double
-        count++;
-        token = strtok(NULL, ",");
+	// Flush final pour s'assurer que tout est écrit
+	err = flash_img_buffered_write(&fic, NULL, 0, true);
+	if (err) {
+		printk("Erreur flush final: %d\n", err);
+	}
+
+	boot_request_upgrade(BOOT_SWAP_TYPE_PERM);
+	sys_reboot(SYS_REBOOT_COLD);
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <zephyr/drivers/sensor.h>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+static float sensor_value_to_float(const struct sensor_value *val)
+{
+    return (float)val->val1 + (val->val2 / 1000000.0f);
+}
+ 
+
+
+
+
+volatile float avg = 0;
+float thresold = 19;
+int reset_threshold = 20;
+
+int refresh_rate = 1000;
+int confirmation_rate = 20;
+
+
+
+int menu = -1;
+int tap_state = 0;
+//int reset_state = 0;
+int confirmation_state = 0;
+
+
+
+const char *menu_str[] = {
+    "EXIT MENU",
+	"GPS:",
+    "LTE:",
+	"RELOAD COORDINATES",
+	"FW UPDATE",
+	"OFF"
+};
+int nb_menu = 6;
+
+
+
+
+
+
+
+K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
+K_THREAD_STACK_DEFINE(tap_stack, 1024);
+K_THREAD_STACK_DEFINE(gps_stack, 1024);
+
+struct k_thread accelerometer_data;
+struct k_thread tap_data;
+struct k_thread gps_data;
+
+
+
+
+int measure_rate = 10;
+
+float valuex = 0;
+float valuey = 0;
+float valuez = 0;
+
+
+
+void accelerometer_thread(void *a, void *b, void *c) {
+
+	const struct device *lis2dh = (const struct device *)a;
+
+    while (1) {
+
+		struct sensor_value accel[3];
+		if (sensor_sample_fetch(lis2dh) < 0) {
+			LOG_INF("Erreur lors de la récupération des données du capteur\n");
+			return;
+		}
+
+		if (sensor_channel_get(lis2dh, SENSOR_CHAN_ACCEL_XYZ, accel) < 0) {
+			LOG_INF("Erreur lors dze la récupération des données du capteur\n");
+			return;
+		}
+
+		float ax = sensor_value_to_float(&accel[0]);
+		float ay = sensor_value_to_float(&accel[1]);
+		float az = sensor_value_to_float(&accel[2]);
+
+
+		avg += sqrtf(ax*ax+ay*ay+az*az)-9.8;
+
+
+		valuex = ax*ax;
+		valuey = ay*ay;
+		valuez = az*az;
+
+
+		k_sleep(K_MSEC(measure_rate));
+
     }
-
-	targets_count = (count/2);
-
+}
 
 
-		x = 0;
-		y = 8;
+int tap_reset_rate = 10;
+int tap_threshold = 35;
+int tap_kickback_waittime = 100;
 
-		snprintf(line, sizeof(line),"%d targets",targets_count);
+
+
+int confirmation_timeout = 30;
+
+int multitap = 0;
+
+int bypass = 0;
+
+void tap_thread(void *a, void *b, void *c) {
+
+	int reset_state = 0;
+
+	while(1){
+
+
+		if(reset_state >= reset_threshold){
+
+			reset_state = 0;
+			avg = 0;
+			tap_state = 0;
+
+
+			
+		}
+
+		if(fabs(avg) > tap_threshold){
+			LOG_INF("TAPPED %.2f",valuex);
+
+
+
+			tap_state = 1;
+			reset_state = reset_threshold;
+			k_sleep(K_MSEC(tap_kickback_waittime));
+		}
+
+		k_sleep(K_MSEC(tap_reset_rate));
+		reset_state += 1;
+	}
+}
+
+
+
+
+uint32_t last_fix = 0;
+
+
+
+
+
+
+
+int gps_rate = 500;
+
+
+
+void gps_thread(void *a, void *b, void *c) {
+
+
+
+while(true){
+
+							k_mutex_lock(&lte_mutex, K_FOREVER);
+//for (;;) {
+//		(void)k_poll(events, 2, K_FOREVER);
+
+			//LOG_INF("%d %d",events[0].state,K_POLL_STATE_SEM_AVAILABLE);
+		//if (events[0].state == K_POLL_STATE_SEM_AVAILABLE &&
+		//    k_sem_take(events[0].sem, K_NO_WAIT) == 0) {
+
+			print_satellite_stats(&last_pvt);
+
+			if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+							fix_timestamp = k_uptime_get();
+							print_fix_data(&last_pvt);
+							//print_distance_from_reference(&last_pvt);
+
+
+						} else {
+
+							last_fix = (uint32_t)((k_uptime_get() - fix_timestamp) / 1000);
+
+						}
+
+
+
+		//	}
+
+								k_mutex_unlock(&lte_mutex);
+	k_sleep(K_MSEC(gps_rate));
+
+}
+
+
+
+}
+
+
+
+
+
+
+
+
+
+void exit_menu(const struct device *i2c_dev){
+
+	menu = -1;
+	clear_display2(i2c_dev);
+
+}
+
+void change_gps(const struct device *i2c_dev){
+
+uint8_t x = 5*6, y = 8;
+char message[128];
+if(gps_state == 0){
+	gps_state = 1;
+	snprintf(message, sizeof(message), " ON ");
+						}else{
+							gps_state = 0;
+							snprintf(message, sizeof(message), " OFF");
+						}
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,1);
+					x += 6;
+
+				}
+}
+
+void change_lte(const struct device *i2c_dev){
+
+uint8_t x = 5*6, y = 16;
+char message[128];
+if(lte_state == 0){
+	lte_state = 1;
+	snprintf(message, sizeof(message), " ON ");
+						}else{
+							lte_state = 0;
+							snprintf(message, sizeof(message), " OFF");
+						}
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,1);
+					x += 6;
+
+				}
+}
+
+void clear_display2(const struct device *i2c_dev) {
+    // 1. Efface le framebuffer RAM
+    memset(framebuffer, 0, sizeof(framebuffer));
+
+    // 2. Pour chaque page, envoie 128 zéros d'un coup
+    uint8_t zeros[128] = {0};
+    for (uint8_t page = 0; page < 8; page++) {
+        ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
+        ssd1306_write_cmd(i2c_dev, 0);    // Start column
+        ssd1306_write_cmd(i2c_dev, 127);  // End column
+        ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
+        ssd1306_write_cmd(i2c_dev, page); // Start page
+        ssd1306_write_cmd(i2c_dev, page); // End page
+
+        // Envoie 128 octets d'un coup (plus rapide que 128 appels séparés)
+        uint8_t buf[129];
+        buf[0] = 0x40; // Control byte for data
+        memset(&buf[1], 0, 128);
+        i2c_write(i2c_dev, buf, sizeof(buf), SSD1306_I2C_ADDR);
+    }
+}
+
+
+
+
+
+volatile int first = 0;
+
+
+
+void reload_coordinates(const struct device *i2c_dev){
+
+	if(lte_state == 0){return; }
+
+	clear_display2(i2c_dev);
+
+
+	uint8_t x = 5*6, y = 16;
+	
+	int err;
+	uint8_t cnt = 0;
+	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
+
+	x=0;
+	y=0;
+
+		char line[128];
+		snprintf(line,sizeof(line),"Initialization...");
 		for (const char *p = line; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y);
+			dessiner_caractere(i2c_dev, *p, x, y,0);
 			x += 6;
 
 		}
 
 
 
-    // Afficher les résultats
-    for (size_t i = 0; i < targets_count*2; i++) {
-
-		targets[i] = values[i];
-
-        //printf("Valeur %zu = %f\n", i, values[i]);
-    }
-
-
-    LOG_INF("Finished. Closing socket");
-    err = close(client_fd);
-
-}
-
-    freeaddrinfo(res);
-	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
-
-}
 
 
 
 
-
-
-
-int main(void)
-{
-
-
-//Démarre
-//Va chercher ses coordonnées GPS
-//Les stockent dans une structure
-//Va se chercher un point GPS et tous ses satellites
-//
-
-
-
-	//const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
-	if (!device_is_ready(i2c_dev)) {
-		LOG_ERR("I2C device not ready");
-		return -ENODEV;
-	}
-	LOG_INF("I2C device is ready");
-
-	clear_display(i2c_dev); // Efface l'écran avant de dessiner
-    ssd1306_init(i2c_dev); // <-- Ajoute cette ligne ici
-
- 
-
-
-	int err;
-	uint8_t cnt = 0;
-	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
-
-
-
-
-
-
-
-	err = nrf_modem_lib_init();
-	if (err) {
-		LOG_ERR("Modem library initialization failed, error: %d", err);
-		return err;
-	}
 
 
 	lte_lc_init();
@@ -1305,112 +1791,181 @@ int main(void)
 	initial_connexion();
 
 
-	/* DISPLAY THE 3 TARGETS
-	uint8_t x = 0, y = 0;
-	char linex[128];
+	menu = -1;
+	bypass = 1;
+	multitap = 1;
+	first = 0;
 
-	double initial_latitude = 45.57728199820725;
-	double initial_longitude = -73.31914921587284;
+}
 
 
-	for(int i=0;i<targets_count;i++){
 
-		int heading, distance;
 
-		calcul_cap_distance_int(initial_latitude, initial_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
 
-		snprintf(linex, sizeof(linex), "%1d: %3d DEG  |  %4d m", i+1, heading, distance);
 
-		for (const char *p = linex; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y);
-		x += 6;
+
+
+
+void firmware_update(const struct device *i2c_dev){
+
+
+if(lte_state == 0){return; }
+
+	clear_display2(i2c_dev);
+
+
+	uint8_t x = 5*6, y = 16;
+	
+	int err;
+	uint8_t cnt = 0;
+	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
+
+
+	x=0;
+	y=0;
+
+		char line[128];
+		snprintf(line,sizeof(line),"Initialization...");
+		for (const char *p = line; *p; p++) {
+			dessiner_caractere(i2c_dev, *p, x, y,0);
+			x += 6;
+
+		}
+
+
+
+
+
+
+
+
+
+	lte_lc_init();
+	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
+
+	flash_firmware();
+
+
+	menu = -1;
+	bypass = 1;
+	multitap = 1;
+
+}
+
+
+
+
+
+
+
+#include <zephyr/sys/reboot.h>
+
+uint32_t ref_lastfix = 0;
+
+void ssd1306_power_off(const struct device *i2c_dev) {
+    ssd1306_write_cmd(i2c_dev, 0xAE); // Display OFF
+}
+
+void ssd1306_power_on(const struct device *i2c_dev) {
+    ssd1306_write_cmd(i2c_dev, 0xAF); // Display ON
+}
+
+void off(const struct device *i2c_dev){
+
+	ssd1306_power_off(i2c_dev);
+
+	gps_rate = 60000;
+	refresh_rate = 60000;
+	confirmation_rate = 60000;
+
+	while(tap_state == 0){
+
+
+		k_sleep(K_SECONDS(5));
 
 	}
 
-		y+= 8;
-		x = 0;
+	gps_rate = 500;
+	refresh_rate = 1000;
+	confirmation_rate = 20;
+
+	ssd1306_power_on(i2c_dev);
+
+}
+
+
+int main(void)
+{
+
+k_mutex_init(&lte_mutex);
+
+		uint8_t x = 0, y = 0;
+		int j = 0;
+
+char message[128];
+
+
+	//const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(i2c_dev)) {
+		LOG_ERR("I2C device not ready");
+		sys_reboot(SYS_REBOOT_COLD);
 	}
+	LOG_INF("I2C device is ready");
 
-	k_sleep(K_FOREVER);
-
-	*/
-
-
+	clear_display2(i2c_dev); // Efface l'écran avant de dessiner
+    ssd1306_init(i2c_dev); // <-- Ajoute cette ligne ici
 
 
 
 
-/**
-
-x = 0;
-y = 0;
-
-char *line = ">START GPS";
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-y+=8;
-x=0;
-
-line = " START GPS + LTE";
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-y+=8;
-x=0;
-
-line = "----------------------------";
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-
-y+=8;
-x=0;
-
-line = "LAST FIX: 1 min";
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-y+=8;
-x=0;
-line = "1. 12   deg | 200   m";
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-y+=8;
-x=0;
-line = "2. 250  deg | 200   m";
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
+		snprintf(message, sizeof(message), "FW_version 3");
 	
 
+		x = 0;
+		y = 0;
+		for (const char *p = message; *p; p++) {
+			dessiner_caractere(i2c_dev, *p, x, y,0);
+			x += 6;
 
-**/
+		}
+
+	k_sleep(K_SECONDS(5));
+	clear_display2(i2c_dev); // Efface l'écran avant de dessiner
 
 
 
 
 
 
+
+    const struct device *lis2dh = DEVICE_DT_GET_ONE(st_lis2dh);
+
+    if (!device_is_ready(lis2dh)) {
+        LOG_ERR("Erreur : LIS2DH non prêt\n");
+        sys_reboot(SYS_REBOOT_COLD);
+    }
+
+	k_thread_create(&accelerometer_data, accelerometer_stack, 1024,accelerometer_thread, (void *)lis2dh, NULL, NULL,5, 0, K_NO_WAIT);
+	k_thread_create(&tap_data, tap_stack, 1024,tap_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
+	k_thread_create(&gps_data, gps_stack, 1024,gps_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
+
+
+
+
+
+	int err;
+	uint8_t cnt = 0;
+	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
+
+
+	err = nrf_modem_lib_init();
+	if (err) {
+		LOG_ERR("Modem library initialization failed, error: %d", err);
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+
+	lte_lc_init();
+	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
 
 
 
@@ -1446,181 +2001,405 @@ for (const char *p = line; *p; p++) {
 
 	lte_lc_init();
 
-	
-	for (;;) {
-		(void)k_poll(events, 2, K_FOREVER);
-
-		if (events[0].state == K_POLL_STATE_SEM_AVAILABLE &&
-		    k_sem_take(events[0].sem, K_NO_WAIT) == 0) {
-			/* New PVT data available */
-
-			if (IS_ENABLED(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)) {
-				/* TTFF test mode. */
-
-				/* Calculate the time GNSS has been blocked by LTE. */
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-					time_blocked++;
-				}
-			} else if (IS_ENABLED(CONFIG_GNSS_SAMPLE_NMEA_ONLY)) {
-				/* NMEA-only output mode. */
-
-				if (output_paused()) {
-				//	goto handle_nmea;
-				}
-
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-					print_distance_from_reference(&last_pvt);
-				}
-			} else {
-				/* PVT and NMEA output mode. */
-
-				if (output_paused()) {
-				//	goto handle_nmea;
-				}
-
-				//printf("\033[1;1H");
-				//printf("\033[2J");
-				print_satellite_stats(&last_pvt);
-
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-					printf("GNSS operation blocked by LTE\n");
-					//k_sleep(K_SECONDS(30));
-				}
-				if (last_pvt.flags &
-				    NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
-					printf("Insufficient GNSS time windows\n");
-						//k_sleep(K_SECONDS(30));
-
-				}
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT) {
-					printf("Sleep period(s) between PVT notifications\n");
-				}
-				printf("-----------------------------------\n");
-
-				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-					fix_timestamp = k_uptime_get();
-					print_fix_data(&last_pvt);
-					print_distance_from_reference(&last_pvt);
-				} else {
-					printf("Seconds since last fix: %d\n",
-					       (uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
-					cnt++;
-					printf("Searching [%c]\n", update_indicator[cnt%4]);
-
-
-				}
-
-				printf("\nNMEA strings:\n\n");
-
-
-				uint8_t x = 0, y = 0;
-
-char line[128];
 
 
 
 
 
 
-y=8;
-x=0;
-snprintf(line, sizeof(line), "Last fix: %d   ",
-					       (uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
 
 
-for (const char *p = line; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
 
-}
-			}
+
+	multitap = 0;
+	int confirmation = 0;
+
+
+
+	while(true){
+
+
+		
+	if(menu == -1){
+
+				if(first == 0){
+					
+		snprintf(message, sizeof(message), "T: %2d U: %2d Un: %d", 0, 0, 0);
+
+		x = 0;
+		y = 0;
+		for (const char *p = message; *p; p++) {
+			dessiner_caractere(i2c_dev, *p, x, y,1);
+			x += 6;
+
 		}
 
-handle_nmea:
+		y=8;
+		x=0;
+		snprintf(message, sizeof(message), "Last fix: %d   ",0);
 
 
-	}
+		for (const char *p = message; *p; p++) {
+			dessiner_caractere(i2c_dev, *p, x, y,1);
+			x += 6;
+
+		}
+
+
+		x = 0; 
+		y = 32;
+
+
+		for(int i=0;i<targets_count;i++){
+
+			int heading, distance;
+
+
+			snprintf(message, sizeof(message), "%1d:     DEG  |       m", i+1, heading, distance);
+
+			for (const char *p = message; *p; p++) {
+				dessiner_caractere(i2c_dev, *p, x, y,1);
+			x += 6;
+
+		}
+
+			y+= 8;
+			x = 0;
+		}
+
+
+				}
+
+
+
+				if(last_fix != ref_lastfix){
+					ref_lastfix = last_fix;
+					y=8;
+					x=10*6;
+
+					snprintf(message, sizeof(message), "%d   ",last_fix);
+					for (const char *p = message; *p; p++) {
+						dessiner_caractere(i2c_dev, *p, x, y,1);
+						x += 6;
+
+					}
+		
+				}
+
+				if(gps_state == 1 || first == 0){
+
+					first = 1;
+					y = 0;
+
+					if(last_tracked != gps_tracking){
+
+						snprintf(message, sizeof(message), "%2d", gps_tracking);
+
+						x=3*6;
+
+						for (const char *p = message; *p; p++) {
+							dessiner_caractere(i2c_dev, *p, x, y,1);
+							x += 6;
+						}
+
+						last_tracked = gps_tracking;
+
+					}
+
+					if(last_in_fix != gps_using){
+
+						snprintf(message, sizeof(message), "%2d", gps_using);
+
+						x=9*6;
+
+						for (const char *p = message; *p; p++) {
+							dessiner_caractere(i2c_dev, *p, x, y,1);
+							x += 6;
+						}
+
+						last_in_fix = gps_using;
+					}
+
+					if(last_unhealthy != gps_unk){
+
+					snprintf(message, sizeof(message), "%2d", gps_unk);
+
+
+					x=16*6;
+
+					for (const char *p = message; *p; p++) {
+						dessiner_caractere(i2c_dev, *p, x, y,1);
+						x += 6;
+					}
+
+						last_unhealthy = gps_unk;
+
+					}
+
+	//uint8_t x = 0, y = 32;
+	char linex[128];
+
+
+
+
+					if(lte_state == 1 && gps_using >= 4){
+
+					if(position >= 5*20){
+
+						position = 0;
+
+						k_mutex_lock(&lte_mutex, K_SECONDS(60));
+
+						send_to_cloud();
+
+						k_mutex_unlock(&lte_mutex);
+
+					}
+
+					if((position+20) % 20 == 0){
+					ts[position/20] = timestamp;
+					lat[position/20] = last_latitude;
+					lng[position/20] = last_longitude;
+
+					}
+
+					position++;
+		
+
+
+					}
+
+
+
+
+
+	if(fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
+
+		ref_latitude2 = last_latitude;
+		ref_longitude2 = last_longitude;
+
+
+		x = 0; 
+		y = 32;
+
+		for(int i=0;i<targets_count;i++){
+
+			int heading, distance;
+
+			calcul_cap_distance_int(last_latitude, last_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
+
+			if(distance > 10000){
+				distance = 9999;
+			}
+
+
+			x = 3*6;
+
+
+
+			snprintf(linex, sizeof(linex), "%3d", heading);
+			for (const char *p = linex; *p; p++) {
+				dessiner_caractere(i2c_dev, *p, x, y,1);
+			x += 6;
+			}
+
+			x = 14*6;
+			snprintf(linex, sizeof(linex), "%4d", distance);
+			for (const char *p = linex; *p; p++) {
+				dessiner_caractere(i2c_dev, *p, x, y,1);
+			x += 6;
+			}
+
+			y+= 8;
+			x = 0;
+		}
 
 
 
 
 
 
-	
-int k = 0;
-	while (true) {
-		k_sleep(K_SECONDS(1));
+
+
+
+
+}
+
+				}
+
+		}
+
+
+		if(tap_state == 1 || bypass == 1){
+
+			bypass = 0;
+			multitap += 1;
+
+
+			if(menu == -1){
+
+				multitap = 0;
+				LOG_INF("GOING IN THE MENU");
+				menu = 0;
+
+
+
+				clear_display2(i2c_dev);
+				y=0;
+
+				for(int i=0;i<nb_menu;i++){
+
+					LOG_INF("%s",menu_str[i]);
+					snprintf(message, sizeof(message), menu_str[i]);
+
 
 		
+				x = 6;
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,0);
+					x += 6;
+
+				}
+
+				if(i == 1){
+
+						if(gps_state == 0){
+							snprintf(message, sizeof(message), " OFF");
+						}else{
+							snprintf(message, sizeof(message), " ON ");
+						}
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,0);
+					x += 6;
+
+				}
+					}
+					if(i == 2){
+
+						if(lte_state == 0){
+							snprintf(message, sizeof(message), " OFF");
+						}else{
+							snprintf(message, sizeof(message), " ON ");
+						}
+
+										for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,0);
+					x += 6;
+
+				}
+					}
+
+
+
+
+
+
+				y += 8;
+
+
+				}
+
+
+				//Remettre le nouveau caractère
+				snprintf(message, sizeof(message), ">");
+				x = 0;
+				y = 0;
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,0);
+					x += 6;
+
+				}
+
+				confirmation = 0;
+
+			}
+			if(menu != -1 && multitap == 1){
+
+				multitap = 0;
+				confirmation = 0;
+				
+				//effacer le caractère
+				snprintf(message, sizeof(message), " ");
+				x = 0;
+				y = menu*8;
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,1);
+					x += 6;
+
+				}
+				//Changer la position
+				menu = (menu + 1 + nb_menu) % nb_menu;
+
+				//Remettre le nouveau caractère
+				snprintf(message, sizeof(message), ">");
+				x = 0;
+				y = menu*8;
+				for (const char *p = message; *p; p++) {
+					dessiner_caractere(i2c_dev, *p, x, y,0);
+					x += 6;
+
+				}
+					
+
+			}
+
+
+
+
 		
-
-uint8_t x = 0, y = 0;
-
-const char *line1 = "Acquisition: 1 min";
-for (const char *p = line1; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-y+=8;
-x=0;
-const char *line2 = "1: 12  deg | 200  m";
-for (const char *p = line2; *p; p++) {
-    dessiner_caractere(i2c_dev, *p, x, y);
-    x += 6;
-
-}
-
-y+=8;
-x=0;
-const char *line3 = "2: 60  deg | 20   m";
-for (const char *p = line3; *p; p++) {
-	dessiner_caractere(i2c_dev, *p, x, y);
-	x += 6;
-
-}
+		}
 
 
+		if(menu != -1 && confirmation >= confirmation_timeout){
 
-int cap, dist;
-calcul_cap_distance_int(48.8566, 2.3522, 43.6045, 1.4442, &cap, &dist);
-// cap et dist sont maintenant des entiers
+				multitap = 0;
+				confirmation = 0;
+
+				LOG_ERR("MENU CHOISI: %s",menu_str[menu]);
 
 
-y+=8;
-x=0;
-char line4[32];
+				switch(menu){
 
-snprintf(line4, sizeof(line4), "3: %d deg | %d m", cap, dist);
-
-for (const char *p = line4; *p; p++) {
-	dessiner_caractere(i2c_dev, *p, x, y);
-	x += 6;
-
-}
+					case 0: 
+							exit_menu(i2c_dev);
+							first = 0;
+							last_tracked = 0;
+							last_fix = 0;
+							last_in_fix = 0;
+							last_unhealthy = 0;
+							last_latitude = 0;
+							last_longitude = 0;
+							break;
+					case 1: 
+							change_gps(i2c_dev);
+									first = 0;
+							break;
+					case 2:
+							change_lte(i2c_dev);
+									first = 0;
+							break;
+					case 3:
+							reload_coordinates(i2c_dev);
+									first = 0;
+							break;
+					case 4:
+							flash_firmware();
+							break;
+					case 5:
+							off(i2c_dev);
+							break;
+				}
 
 
 
 
+			}
 
-
-
-
-
-
-
-k_sleep(K_FOREVER); // Pause pour voir le résultat
-
-
-
+		k_sleep(K_MSEC(100));	
+		confirmation += 1;	
 
 
 	}
-	{
-		/* code */
-	}
-	
 
 	return 0;
 }
