@@ -337,6 +337,16 @@ BUILD_ASSERT((sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) == 1 &&
 
 
 
+struct shared_state {
+	struct k_mutex mutex;
+	struct k_condvar cond;
+	bool ready;
+};
+
+struct shared_state state;
+
+
+
 static void gnss_event_handler(int event)
 {
 	int retval;
@@ -732,7 +742,7 @@ time_t ts[5];
 
 char send_buf[2000];
 
-bool gps_state = 0;
+bool gps_state = 1;
 bool lte_state = 0;
 
 struct k_mutex lte_mutex;
@@ -1005,11 +1015,11 @@ void initial_connexion(){
 	int err = 0;
 
 	lte_lc_connect();
-		if (err) {
-			LOG_ERR("Failed to connect to LTE network, error: %d", err);
-		}
+	if (err) {
+		LOG_ERR("Failed to connect to LTE network, error: %d", err);
+	}
 
-		LOG_INF("Connected to LTE network");
+	LOG_INF("Connected to LTE network");
 
 	struct sockaddr_in local_addr;
     struct addrinfo *res;
@@ -1051,16 +1061,11 @@ void initial_connexion(){
     LOG_INF("Prepare send buffer:");
 
 	
-		uint8_t x = 0, y = 8;
+	uint8_t x = 0, y = 8;
 
-		char line[128];
-		snprintf(line,sizeof(line),"Connecting...");
-		for (const char *p = line; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
-
-		}
-
+	char line[128];
+	snprintf(line,sizeof(line),"CONNECTING...");
+	write_line(i2c_dev, line, x,y,0);
 
 
 	send_data_len = snprintf(send_buf, 2000,
@@ -1116,12 +1121,16 @@ void initial_connexion(){
 		x = 0;
 		y = 16;
 
-		snprintf(line, sizeof(line),"%d targets",targets_count);
-		for (const char *p = line; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
+		if(targets_count <= 1){
+			snprintf(line, sizeof(line),"%d TARGET",targets_count);
 
-		}
+		}else{
+			snprintf(line, sizeof(line),"%d TARGETS",targets_count);
+
+		}	
+
+		write_line(i2c_dev, line, x, y,0);
+
 
     // Afficher les résultats
     for (size_t i = 0; i < targets_count*2; i++) {
@@ -1292,21 +1301,16 @@ void tap_thread(void *a, void *b, void *c) {
 
 	while(1){
 
-
 		if(reset_state >= reset_threshold){
 
 			reset_state = 0;
 			avg = 0;
 			tap_state = 0;
-
-
 			
 		}
 
 		if(fabs(avg) > tap_threshold){
 			LOG_INF("TAPPED %.2f",valuex);
-
-
 
 			tap_state = 1;
 			reset_state = reset_threshold;
@@ -1320,17 +1324,20 @@ void tap_thread(void *a, void *b, void *c) {
 
 void gps_thread(void *a, void *b, void *c) {
 
-
-
 while(true){
 
-							k_mutex_lock(&lte_mutex, K_FOREVER);
-//for (;;) {
-//		(void)k_poll(events, 2, K_FOREVER);
+k_mutex_lock(&state.mutex, K_FOREVER);
+while(!state.ready) {
+	k_condvar_wait(&state.cond, &state.mutex,K_FOREVER);
+}
+k_mutex_unlock(&state.mutex);
 
-			//LOG_INF("%d %d",events[0].state,K_POLL_STATE_SEM_AVAILABLE);
-		//if (events[0].state == K_POLL_STATE_SEM_AVAILABLE &&
-		//    k_sem_take(events[0].sem, K_NO_WAIT) == 0) {
+
+	LOG_INF("GPS");
+
+
+			k_mutex_lock(&lte_mutex, K_FOREVER);
+
 
 			print_satellite_stats(&last_pvt);
 
@@ -1345,10 +1352,6 @@ while(true){
 							last_fix = (uint32_t)((k_uptime_get() - fix_timestamp) / 1000);
 
 						}
-
-
-
-		//	}
 
 								k_mutex_unlock(&lte_mutex);
 	k_sleep(K_MSEC(gps_rate));
@@ -1404,31 +1407,22 @@ if(lte_state == 0){
 
 void reload_coordinates(const struct device *i2c_dev){
 
-	if(lte_state == 0){return; }
+	if(lte_state == 0){return;}
 
 	clear_display(i2c_dev);
 
+	uint8_t x = 0, y = 0;
+	char line[128];
+	snprintf(line,sizeof(line),"INITIALIZATION...");
+	write_line(i2c_dev, line, x, y, 0);
 
-	uint8_t x = 5*6, y = 16;
-	
-	x=0;
-	y=0;
-
-		char line[128];
-		snprintf(line,sizeof(line),"Initialization...");
-		for (const char *p = line; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y,0);
-			x += 6;
-
-		}
 
 	lte_lc_init();
 	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
 
 	initial_connexion();
 
-
-	menu = -1;
+	menu = -2;
 	bypass = 1;
 	multitap = 1;
 	first = 0;
@@ -1487,11 +1481,11 @@ void ssd1306_power_on(const struct device *i2c_dev) {
 
 void off(const struct device *i2c_dev){
 
-	ssd1306_power_off(i2c_dev);
+	k_mutex_lock(&state.mutex, K_FOREVER);
+	state.ready = false;
+	k_mutex_unlock(&state.mutex);
 
-	gps_rate = 60000;
-	refresh_rate = 60000;
-	confirmation_rate = 60000;
+	ssd1306_power_off(i2c_dev);
 
 	while(tap_state == 0){
 
@@ -1500,11 +1494,12 @@ void off(const struct device *i2c_dev){
 
 	}
 
-	gps_rate = 500;
-	refresh_rate = 1000;
-	confirmation_rate = 20;
-
 	ssd1306_power_on(i2c_dev);
+
+	k_mutex_lock(&state.mutex, K_FOREVER);
+	state.ready = true;
+	k_condvar_broadcast(&state.cond);
+	k_mutex_unlock(&state.mutex);
 
 }
 
@@ -1519,6 +1514,10 @@ int main(void)
 {
 
 k_mutex_init(&lte_mutex);
+k_mutex_init(&state.mutex);
+k_condvar_init(&state.cond);
+state.ready = true;
+
 
 		uint8_t x = 0, y = 0;
 
@@ -1538,13 +1537,11 @@ char message[128];
 
 
 	write_line(i2c_dev, "FW_VERSION 3", 0, 0, 1);
-
-
 	k_sleep(K_SECONDS(5));
+
 	clear_display(i2c_dev); // Efface l'écran avant de dessiner
 
     const struct device *lis2dh = DEVICE_DT_GET_ONE(st_lis2dh);
-
     if (!device_is_ready(lis2dh)) {
         LOG_ERR("Erreur : LIS2DH non prêt\n");
         sys_reboot(SYS_REBOOT_COLD);
@@ -1575,17 +1572,17 @@ char message[128];
 
 	if (modem_init() != 0) {
 		LOG_ERR("Failed to initialize modem");
-		return -1;
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 
 	if (sample_init() != 0) {
 		LOG_ERR("Failed to initialize sample");
-		return -1;
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 
 	if (gnss_init_and_start() != 0) {
 		LOG_ERR("Failed to initialize and start GNSS");
-		return -1;
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 
 	fix_timestamp = k_uptime_get();
@@ -1601,11 +1598,11 @@ char message[128];
 
 		if(first == 0){
 					
-		snprintf(message, sizeof(message), "T: %2d U: %2d Un: %d", 0, 0, 0);
-		write_line(i2c_dev, message, 0, 0, 1);
+		snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
+		write_line(i2c_dev, message, 0, 0, 0);
 
-		snprintf(message, sizeof(message), "Last fix: %d   ",0);
-		write_line(i2c_dev, message, 0, 8, 1);
+		snprintf(message, sizeof(message), "LAST FIX: %d   ",0);
+		write_line(i2c_dev, message, 0, 8, 0);
 
 
 		x = 0; 
@@ -1614,9 +1611,17 @@ char message[128];
 
 		for(int i=0;i<targets_count;i++){
 
-			snprintf(message, sizeof(message), "%1d:     DEG  |       m", i+1);
-			write_line(i2c_dev, message, x, y, 1);
+			snprintf(message, sizeof(message), "%1d:",i+1);
+			write_line(i2c_dev, message, 0, y, 0);
 
+			snprintf(message, sizeof(message), "DEG");
+			write_line(i2c_dev, message, 7*6, y, 0);
+
+			snprintf(message, sizeof(message), "|");
+			write_line(i2c_dev, message, 12*6, y, 0);
+
+			snprintf(message, sizeof(message), "M");
+			write_line(i2c_dev, message, 20*6, y, 0);
 
 			y+= 8;
 			x = 0;
@@ -1676,11 +1681,6 @@ char message[128];
 
 					}
 
-	char linex[128];
-
-
-
-
 					if(lte_state == 1 && gps_using >= 4){
 
 					if(position >= 5*20){
@@ -1696,10 +1696,9 @@ char message[128];
 					}
 
 					if((position+20) % 20 == 0){
-					ts[position/20] = timestamp;
-					lat[position/20] = last_latitude;
-					lng[position/20] = last_longitude;
-
+						ts[position/20] = timestamp;
+						lat[position/20] = last_latitude;
+						lng[position/20] = last_longitude;
 					}
 
 					position++;
@@ -1712,7 +1711,6 @@ char message[128];
 
 		ref_latitude2 = last_latitude;
 		ref_longitude2 = last_longitude;
-
 
 		x = 0; 
 		y = 32;
@@ -1730,12 +1728,12 @@ char message[128];
 
 			x = 3*6;
 
-			snprintf(linex, sizeof(linex), "%3d", heading);
-			write_line(i2c_dev, linex, x, y, 1);
+			snprintf(message, sizeof(message), "%3d", heading);
+			write_line(i2c_dev, message, x, y, 1);
 
 			x = 14*6;
-			snprintf(linex, sizeof(linex), "%4d", distance);
-			write_line(i2c_dev, linex, x, y, 1);
+			snprintf(message, sizeof(message), "%4d", distance);
+			write_line(i2c_dev, message, x, y, 1);
 
 			y+= 8;
 			x = 0;
@@ -1747,19 +1745,17 @@ char message[128];
 
 		}
 
-		if(tap_state == 1 || bypass == 1){
+	if(tap_state == 1 || bypass == 1){
 
 			bypass = 0;
 			multitap += 1;
 
 
-			if(menu == -1){
+			if(menu == -1 || menu == -2){
 
 				multitap = 0;
 				LOG_INF("GOING IN THE MENU");
 				menu = 0;
-
-
 
 				clear_display(i2c_dev);
 				y=0;
@@ -1767,11 +1763,11 @@ char message[128];
 				for(int i=0;i<nb_menu;i++){
 
 					LOG_INF("%s",menu_str[i]);
-				x = 6;
-				snprintf(message, sizeof(message), "%s",menu_str[i]);
-				write_line(i2c_dev, message, x, y, 0);
+					x = 6;
+					snprintf(message, sizeof(message), "%s",menu_str[i]);
+					write_line(i2c_dev, message, x, y, 0);
 
-				if(i == 1){
+					if(i == 1){
 
 						if(gps_state == 0){
 							snprintf(message, sizeof(message), " OFF");
@@ -1779,7 +1775,7 @@ char message[128];
 							snprintf(message, sizeof(message), " ON ");
 						}
 
-				write_line(i2c_dev,message, 5*6,y,0);
+						write_line(i2c_dev,message, 5*6,y,0);
 
 					}
 					if(i == 2){
@@ -1790,7 +1786,7 @@ char message[128];
 							snprintf(message, sizeof(message), " ON ");
 						}
 
-				write_line(i2c_dev,message, 5*6,y,0);
+						write_line(i2c_dev,message, 5*6,y,0);
 					}
 
 				y += 8;
@@ -1800,13 +1796,14 @@ char message[128];
 
 
 				//Remettre le nouveau caractère
-				snprintf(message, sizeof(message), ">");
 				x = 0;
 				y = 0;
+				snprintf(message, sizeof(message), ">");
 				write_line(i2c_dev, message, x, y, 0);
 				confirmation = 0;
 
 			}
+			
 			if(menu != -1 && multitap == 1){
 
 				multitap = 0;
@@ -1816,7 +1813,6 @@ char message[128];
 				snprintf(message, sizeof(message), " ");
 				write_line(i2c_dev, message, 0, menu*8, 1);
 
-				
 				//Changer la position
 				menu = (menu + 1 + nb_menu) % nb_menu;
 
@@ -1824,13 +1820,11 @@ char message[128];
 				snprintf(message, sizeof(message), ">");
 				write_line(i2c_dev, message, 0, menu*8, 0);
 
-				
 			}
 
 		}
 
-
-		if(menu != -1 && confirmation >= confirmation_timeout){
+	if(menu != -1 && confirmation >= confirmation_timeout){
 
 				multitap = 0;
 				confirmation = 0;
@@ -1869,9 +1863,6 @@ char message[128];
 							off(i2c_dev);
 							break;
 				}
-
-
-
 
 			}
 
