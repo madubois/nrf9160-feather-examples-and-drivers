@@ -16,16 +16,34 @@
 #include <modem/nrf_modem_lib.h>
 #include <date_time.h>
 
-LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
-
-
 
 #include <zephyr/drivers/i2c.h>
 
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <nrf_modem_at.h>
+#include <nrf_modem_gnss.h>
+#include <modem/lte_lc.h>
+#include <modem/nrf_modem_lib.h>
+#include <date_time.h>
+
+#include <zephyr/net/socket.h>
+#include <zephyr/kernel.h>
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/sys/crc.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/dfu/flash_img.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/sys/reboot.h>
 
 
-
-
+LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
 
 
 
@@ -45,9 +63,6 @@ static int ssd1306_write_data(const struct device *i2c_dev, uint8_t data) {
 
 
 static uint8_t framebuffer[128][8] = {0}; // 128 colonnes x 4 pages (pour 128x32)
-
-
-
 
 
 
@@ -87,7 +102,6 @@ void eteindre_pixel(const struct device *i2c_dev, uint8_t x, uint8_t y) {
     ssd1306_write_data(i2c_dev, framebuffer[x][page]);
 }
 
-
 static void ssd1306_init(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0xAE); // Display OFF
     ssd1306_write_cmd(i2c_dev, 0xD5); // Set display clock divide ratio/oscillator freq
@@ -115,12 +129,6 @@ static void ssd1306_init(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0xA6); // Set normal display (not inverted)
     ssd1306_write_cmd(i2c_dev, 0xAF); // Display ON
 }
-
-
-
-
-
-
 
 // Table ASCII '0'-'9', 'A'-'Z' (0-9 puis A-Z)
 static const uint8_t font_5x7[96][5] = {
@@ -222,7 +230,6 @@ static const uint8_t font_5x7[96][5] = {
 	{ 0x08, 0x1C, 0x2A, 0x08, 0x08 }   // 7F 127
 };
 
-
 void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t y, bool erase) {
 
 
@@ -250,45 +257,18 @@ void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t
 }
 
 
-void clear_display(const struct device *i2c_dev) {
-
-	    for (uint8_t page = 0; page < 8; page++) { // 4 pages pour 32 lignes
-        ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
-        ssd1306_write_cmd(i2c_dev, 0);    // Start column
-        ssd1306_write_cmd(i2c_dev, 127);  // End column
-        ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
-        ssd1306_write_cmd(i2c_dev, page); // Start page
-        ssd1306_write_cmd(i2c_dev, page); // End page
-        for (uint8_t col = 0; col < 128; col++) {
-            ssd1306_write_data(i2c_dev, framebuffer[col][page]);
-        }
-    }
-}
-
-
-
-
-
-
-
-
-
-
-#include <math.h>
-
 // Rayon moyen de la Terre en mètres
 #define EARTH_RADIUS 6371000.0
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#define PI 3.14159265358979323846
+
 
 void calcul_cap_distance_int(double lat1, double lon1, double lat2, double lon2, int *cap_deg, int *distance_m) {
     // Conversion degrés -> radians
-    double lat1_rad = lat1 * M_PI / 180.0;
-    double lon1_rad = lon1 * M_PI / 180.0;
-    double lat2_rad = lat2 * M_PI / 180.0;
-    double lon2_rad = lon2 * M_PI / 180.0;
+    double lat1_rad = lat1 * PI / 180.0;
+    double lon1_rad = lon1 * PI / 180.0;
+    double lat2_rad = lat2 * PI / 180.0;
+    double lon2_rad = lon2 * PI / 180.0;
 
     // Formule de Haversine pour la distance
     double dlat = lat2_rad - lat1_rad;
@@ -304,29 +284,10 @@ void calcul_cap_distance_int(double lat1, double lon1, double lat2, double lon2,
     double x = cos(lat1_rad)*sin(lat2_rad) -
                sin(lat1_rad)*cos(lat2_rad)*cos(dlon);
     double cap_rad = atan2(y, x);
-    *cap_deg = (int)round(fmod((cap_rad * 180.0 / M_PI) + 360.0, 360.0));
+    *cap_deg = (int)round(fmod((cap_rad * 180.0 / PI) + 360.0, 360.0));
 }
 
 
-
-
-
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
-#include <nrf_modem_at.h>
-#include <nrf_modem_gnss.h>
-#include <modem/lte_lc.h>
-#include <modem/nrf_modem_lib.h>
-#include <date_time.h>
-
-//LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
-
-#define PI 3.14159265358979323846
 #define EARTH_RADIUS_METERS (6371.0 * 1000.0)
 
 #if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)
@@ -353,11 +314,9 @@ static struct k_work ttff_test_start_work;
 static uint32_t time_to_fix;
 #endif
 
-static const char update_indicator[] = {'\\', '|', '/', '-'};
 
 static struct nrf_modem_gnss_pvt_data_frame last_pvt;
 static uint64_t fix_timestamp;
-static uint32_t time_blocked;
 
 /* Reference position. */
 static bool ref_used;
@@ -367,15 +326,6 @@ static double ref_longitude;
 K_MSGQ_DEFINE(nmea_queue, sizeof(struct nrf_modem_gnss_nmea_data_frame *), 10, 4);
 static K_SEM_DEFINE(pvt_data_sem, 0, 1);
 static K_SEM_DEFINE(time_sem, 0, 1);
-
-static struct k_poll_event events[2] = {
-	K_POLL_EVENT_STATIC_INITIALIZER(K_POLL_TYPE_SEM_AVAILABLE,
-					K_POLL_MODE_NOTIFY_ONLY,
-					&pvt_data_sem, 0),
-	K_POLL_EVENT_STATIC_INITIALIZER(K_POLL_TYPE_MSGQ_DATA_AVAILABLE,
-					K_POLL_MODE_NOTIFY_ONLY,
-					&nmea_queue, 0),
-};
 
 BUILD_ASSERT(IS_ENABLED(CONFIG_LTE_NETWORK_MODE_LTE_M_GPS) ||
 	     IS_ENABLED(CONFIG_LTE_NETWORK_MODE_NBIOT_GPS) ||
@@ -391,42 +341,7 @@ BUILD_ASSERT((sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) == 1 &&
 	     "CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE and "
 	     "CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE must be both either set or empty");
 
-/* Returns the distance between two coordinates in meters. The distance is calculated using the
- * haversine formula.
- */
-static double distance_calculate(double lat1, double lon1,
-				 double lat2, double lon2)
-{
-	double d_lat_rad = (lat2 - lat1) * PI / 180.0;
-	double d_lon_rad = (lon2 - lon1) * PI / 180.0;
 
-	double lat1_rad = lat1 * PI / 180.0;
-	double lat2_rad = lat2 * PI / 180.0;
-
-	double a = pow(sin(d_lat_rad / 2), 2) +
-		   pow(sin(d_lon_rad / 2), 2) *
-		   cos(lat1_rad) * cos(lat2_rad);
-
-	double c = 2 * asin(sqrt(a));
-
-	return EARTH_RADIUS_METERS * c;
-}
-
-static void print_distance_from_reference(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
-{
-	if (!ref_used) {
-		return;
-	}
-
-	double distance = distance_calculate(pvt_data->latitude, pvt_data->longitude,
-					     ref_latitude, ref_longitude);
-
-	if (IS_ENABLED(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)) {
-		LOG_INF("Distance from reference: %.01f", distance);
-	} else {
-		printf("\nDistance from reference: %.01f\n", distance);
-	}
-}
 
 static void gnss_event_handler(int event)
 {
@@ -696,8 +611,6 @@ static void date_time_evt_handler(const struct date_time_evt *evt)
 	k_sem_give(&time_sem);
 }
 
-
-
 static int modem_init(void)
 {
 	if (IS_ENABLED(CONFIG_DATE_TIME)) {
@@ -878,19 +791,6 @@ static int gnss_init_and_start(void)
 
 
 
-static bool output_paused(void)
-{
-#if defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_LOG_LEVEL_OFF)
-	return false;
-#else
-	return (requesting_assistance || assistance_is_active()) ? true : false;
-#endif
-}
-
-
-
-
-
 
 
 
@@ -914,28 +814,119 @@ float targets[10];
 const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 int targets_count = 0;
 
-
-
-
-
-
-
-
-
-
-
 uint8_t last_tracked = 0;
 uint8_t last_in_fix = 0;
 uint8_t last_unhealthy = 0;
-
-
 
 uint8_t gps_tracking = 0;
 uint8_t gps_using = 0;
 uint8_t gps_unk = 0;
 
 
-static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
+double last_latitude = 0;
+double last_longitude = 0;
+
+double ref_latitude2 = 0;
+double ref_longitude2 = 0;
+
+int lte_wait = 0;
+int lte_quota = 10;
+
+volatile int position=0;
+float lat[5];
+float lng[5];
+time_t ts[5];
+
+#define HTTP_HOST "plongee.duckdns.org"
+#define HTTP_PATH "/targets"
+#define HTTP_PATH_LONG "/coords"
+#define HTTP_PORT 8545
+#define MAX_MTU_SIZE     2000
+#define RECV_BUF_SIZE    2048
+#define SEND_BUF_SIZE    MAX_MTU_SIZE
+
+#define JSON_TEMPLATE "%ld,%.9f,%.9f"
+#define JSON_TEMPLATE_LONG "%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f"
+
+char send_buf[2000];
+
+bool gps_state = 0;
+bool lte_state = 0;
+
+struct k_mutex lte_mutex;
+time_t timestamp;
+volatile float avg = 0;
+float thresold = 19;
+int reset_threshold = 20;
+
+int refresh_rate = 1000;
+int confirmation_rate = 20;
+
+int menu = -1;
+int tap_state = 0;
+int confirmation_state = 0;
+
+const char *menu_str[] = {
+    "EXIT MENU",
+	"GPS:",
+    "LTE:",
+	"RELOAD COORDINATES",
+	"FW UPDATE",
+	"OFF"
+};
+int nb_menu = 6;
+
+K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
+K_THREAD_STACK_DEFINE(tap_stack, 1024);
+K_THREAD_STACK_DEFINE(gps_stack, 1024);
+
+struct k_thread accelerometer_data;
+struct k_thread tap_data;
+struct k_thread gps_data;
+
+int measure_rate = 10;
+
+float valuex = 0;
+float valuey = 0;
+float valuez = 0;
+
+int tap_reset_rate = 10;
+int tap_threshold = 35;
+int tap_kickback_waittime = 100;
+int confirmation_timeout = 30;
+int multitap = 0;
+int bypass = 0;
+uint32_t last_fix = 0;
+int gps_rate = 500;
+volatile int first = 0;
+uint32_t ref_lastfix = 0;
+
+
+
+
+
+void clear_display(const struct device *i2c_dev) {
+    // 1. Efface le framebuffer RAM
+    memset(framebuffer, 0, sizeof(framebuffer));
+
+    // 2. Pour chaque page, envoie 128 zéros d'un coup
+    for (uint8_t page = 0; page < 8; page++) {
+        ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
+        ssd1306_write_cmd(i2c_dev, 0);    // Start column
+        ssd1306_write_cmd(i2c_dev, 127);  // End column
+        ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
+        ssd1306_write_cmd(i2c_dev, page); // Start page
+        ssd1306_write_cmd(i2c_dev, page); // End page
+
+        // Envoie 128 octets d'un coup (plus rapide que 128 appels séparés)
+        uint8_t buf[129];
+        buf[0] = 0x40; // Control byte for data
+        memset(&buf[1], 0, 128);
+        i2c_write(i2c_dev, buf, sizeof(buf), SSD1306_I2C_ADDR);
+    }
+}
+
+void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
 	uint8_t tracked   = 0;
 	uint8_t in_fix    = 0;
@@ -962,54 +953,6 @@ static void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data
 
 }
 
-double last_latitude = 0;
-double last_longitude = 0;
-
-double ref_latitude2 = 0;
-double ref_longitude2 = 0;
-
-
-int lte_wait = 0;
-int lte_quota = 10;
-
-
-volatile int position=0;
-float lat[5];
-float lng[5];
-time_t ts[5];
-
-
-#include <zephyr/net/socket.h>
-
-
-#define HTTP_HOST "plongee.duckdns.org"
-#define HTTP_PATH "/targets"
-#define HTTP_PATH_LONG "/coords"
-#define HTTP_PORT 8545
-#define MAX_MTU_SIZE     2000
-#define RECV_BUF_SIZE    2048
-#define SEND_BUF_SIZE    MAX_MTU_SIZE
-
-#define JSON_TEMPLATE "%ld,%.9f,%.9f"
-#define JSON_TEMPLATE_LONG "%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f"
-
-
-    char send_buf[2000];
-
-bool gps_state = 0;
-bool lte_state = 0;
-
-
-
-
-
-
-
-
-
-
-
-
 int blocking_send(int fd, uint8_t *buf, uint32_t size, uint32_t flags)
 {
     int err;
@@ -1033,11 +976,6 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
     return err;
 }
 
-
-#include <zephyr/kernel.h>
-
-struct k_mutex lte_mutex;
-
 void send_to_cloud(){
 
 
@@ -1051,8 +989,6 @@ struct sockaddr_in local_addr;
     struct addrinfo *res;
     int send_data_len;
     int num_bytes;
-    int mtu_size = MAX_MTU_SIZE;
-    //char send_buf[SEND_BUF_SIZE];
    
     local_addr.sin_family = AF_INET;
     local_addr.sin_port = htons(0);
@@ -1138,8 +1074,6 @@ int ret;
 
 }
 
-time_t timestamp;
-
 void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
 /*
@@ -1186,12 +1120,11 @@ void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 
 void initial_connexion(){
 
-	int err;
+	int err = 0;
 
 	lte_lc_connect();
 		if (err) {
 			LOG_ERR("Failed to connect to LTE network, error: %d", err);
-			return err;
 		}
 
 		LOG_INF("Connected to LTE network");
@@ -1200,7 +1133,6 @@ void initial_connexion(){
     struct addrinfo *res;
     int send_data_len;
     int num_bytes;
-    int mtu_size = MAX_MTU_SIZE;
    
     local_addr.sin_family = AF_INET;
     local_addr.sin_port = htons(0);
@@ -1325,21 +1257,13 @@ void initial_connexion(){
 
 }
 
-
-#include <zephyr/dfu/mcuboot.h>
-#include <zephyr/sys/reboot.h>
-#include <zephyr/sys/crc.h>
-#include <zephyr/storage/flash_map.h>
-#include <zephyr/dfu/flash_img.h>
-
 void flash_firmware(){
 
-	int err;
+	int err = 0;
 
 	lte_lc_connect();
 		if (err) {
 			LOG_ERR("Failed to connect to LTE network, error: %d", err);
-			return err;
 		}
 
 		LOG_INF("Connected to LTE network");
@@ -1352,7 +1276,6 @@ void flash_firmware(){
     struct addrinfo *res;
     int send_data_len;
     int num_bytes;
-    int mtu_size = MAX_MTU_SIZE;
    
     local_addr.sin_family = AF_INET;
     local_addr.sin_port = htons(0);
@@ -1441,101 +1364,11 @@ void flash_firmware(){
 
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <zephyr/drivers/sensor.h>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-static float sensor_value_to_float(const struct sensor_value *val)
+float sensor_value_to_float(const struct sensor_value *val)
 {
     return (float)val->val1 + (val->val2 / 1000000.0f);
 }
  
-
-
-
-
-volatile float avg = 0;
-float thresold = 19;
-int reset_threshold = 20;
-
-int refresh_rate = 1000;
-int confirmation_rate = 20;
-
-
-
-int menu = -1;
-int tap_state = 0;
-//int reset_state = 0;
-int confirmation_state = 0;
-
-
-
-const char *menu_str[] = {
-    "EXIT MENU",
-	"GPS:",
-    "LTE:",
-	"RELOAD COORDINATES",
-	"FW UPDATE",
-	"OFF"
-};
-int nb_menu = 6;
-
-
-
-
-
-
-
-K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
-K_THREAD_STACK_DEFINE(tap_stack, 1024);
-K_THREAD_STACK_DEFINE(gps_stack, 1024);
-
-struct k_thread accelerometer_data;
-struct k_thread tap_data;
-struct k_thread gps_data;
-
-
-
-
-int measure_rate = 10;
-
-float valuex = 0;
-float valuey = 0;
-float valuez = 0;
-
-
-
 void accelerometer_thread(void *a, void *b, void *c) {
 
 	const struct device *lis2dh = (const struct device *)a;
@@ -1571,19 +1404,6 @@ void accelerometer_thread(void *a, void *b, void *c) {
     }
 }
 
-
-int tap_reset_rate = 10;
-int tap_threshold = 35;
-int tap_kickback_waittime = 100;
-
-
-
-int confirmation_timeout = 30;
-
-int multitap = 0;
-
-int bypass = 0;
-
 void tap_thread(void *a, void *b, void *c) {
 
 	int reset_state = 0;
@@ -1615,21 +1435,6 @@ void tap_thread(void *a, void *b, void *c) {
 		reset_state += 1;
 	}
 }
-
-
-
-
-uint32_t last_fix = 0;
-
-
-
-
-
-
-
-int gps_rate = 500;
-
-
 
 void gps_thread(void *a, void *b, void *c) {
 
@@ -1672,18 +1477,10 @@ while(true){
 
 }
 
-
-
-
-
-
-
-
-
 void exit_menu(const struct device *i2c_dev){
 
 	menu = -1;
-	clear_display2(i2c_dev);
+	clear_display(i2c_dev);
 
 }
 
@@ -1723,49 +1520,15 @@ if(lte_state == 0){
 				}
 }
 
-void clear_display2(const struct device *i2c_dev) {
-    // 1. Efface le framebuffer RAM
-    memset(framebuffer, 0, sizeof(framebuffer));
-
-    // 2. Pour chaque page, envoie 128 zéros d'un coup
-    uint8_t zeros[128] = {0};
-    for (uint8_t page = 0; page < 8; page++) {
-        ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
-        ssd1306_write_cmd(i2c_dev, 0);    // Start column
-        ssd1306_write_cmd(i2c_dev, 127);  // End column
-        ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
-        ssd1306_write_cmd(i2c_dev, page); // Start page
-        ssd1306_write_cmd(i2c_dev, page); // End page
-
-        // Envoie 128 octets d'un coup (plus rapide que 128 appels séparés)
-        uint8_t buf[129];
-        buf[0] = 0x40; // Control byte for data
-        memset(&buf[1], 0, 128);
-        i2c_write(i2c_dev, buf, sizeof(buf), SSD1306_I2C_ADDR);
-    }
-}
-
-
-
-
-
-volatile int first = 0;
-
-
-
 void reload_coordinates(const struct device *i2c_dev){
 
 	if(lte_state == 0){return; }
 
-	clear_display2(i2c_dev);
+	clear_display(i2c_dev);
 
 
 	uint8_t x = 5*6, y = 16;
 	
-	int err;
-	uint8_t cnt = 0;
-	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
-
 	x=0;
 	y=0;
 
@@ -1776,14 +1539,6 @@ void reload_coordinates(const struct device *i2c_dev){
 			x += 6;
 
 		}
-
-
-
-
-
-
-
-
 
 	lte_lc_init();
 	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
@@ -1798,28 +1553,16 @@ void reload_coordinates(const struct device *i2c_dev){
 
 }
 
-
-
-
-
-
-
-
-
 void firmware_update(const struct device *i2c_dev){
 
 
 if(lte_state == 0){return; }
 
-	clear_display2(i2c_dev);
+	clear_display(i2c_dev);
 
 
 	uint8_t x = 5*6, y = 16;
 	
-	int err;
-	uint8_t cnt = 0;
-	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
-
 
 	x=0;
 	y=0;
@@ -1852,16 +1595,6 @@ if(lte_state == 0){return; }
 
 }
 
-
-
-
-
-
-
-#include <zephyr/sys/reboot.h>
-
-uint32_t ref_lastfix = 0;
-
 void ssd1306_power_off(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0xAE); // Display OFF
 }
@@ -1893,6 +1626,12 @@ void off(const struct device *i2c_dev){
 
 }
 
+void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8_t y, int erase) {
+	for (const char *p = line; *p; p++) {
+		dessiner_caractere(i2c_dev, *p, x, y, erase);
+		x += 6;
+	}
+}
 
 int main(void)
 {
@@ -1900,7 +1639,6 @@ int main(void)
 k_mutex_init(&lte_mutex);
 
 		uint8_t x = 0, y = 0;
-		int j = 0;
 
 char message[128];
 
@@ -1912,31 +1650,16 @@ char message[128];
 	}
 	LOG_INF("I2C device is ready");
 
-	clear_display2(i2c_dev); // Efface l'écran avant de dessiner
+	clear_display(i2c_dev); // Efface l'écran avant de dessiner
     ssd1306_init(i2c_dev); // <-- Ajoute cette ligne ici
 
 
 
+	write_line(i2c_dev, "FW_VERSION 3", 0, 0, 1);
 
-		snprintf(message, sizeof(message), "FW_version 3");
-	
-
-		x = 0;
-		y = 0;
-		for (const char *p = message; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y,0);
-			x += 6;
-
-		}
 
 	k_sleep(K_SECONDS(5));
-	clear_display2(i2c_dev); // Efface l'écran avant de dessiner
-
-
-
-
-
-
+	clear_display(i2c_dev); // Efface l'écran avant de dessiner
 
     const struct device *lis2dh = DEVICE_DT_GET_ONE(st_lis2dh);
 
@@ -1949,14 +1672,7 @@ char message[128];
 	k_thread_create(&tap_data, tap_stack, 1024,tap_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
 	k_thread_create(&gps_data, gps_stack, 1024,gps_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
 
-
-
-
-
 	int err;
-	uint8_t cnt = 0;
-	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
-
 
 	err = nrf_modem_lib_init();
 	if (err) {
@@ -1966,13 +1682,6 @@ char message[128];
 
 	lte_lc_init();
 	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
-
-
-
-
-
-
-
 
 	/* Initialize reference coordinates (if used). */
 	if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
@@ -2001,49 +1710,20 @@ char message[128];
 
 	lte_lc_init();
 
-
-
-
-
-
-
-
-
-
-
 	multitap = 0;
 	int confirmation = 0;
 
-
-
 	while(true){
 
-
-		
 	if(menu == -1){
 
-				if(first == 0){
+		if(first == 0){
 					
 		snprintf(message, sizeof(message), "T: %2d U: %2d Un: %d", 0, 0, 0);
+		write_line(i2c_dev, message, 0, 0, 1);
 
-		x = 0;
-		y = 0;
-		for (const char *p = message; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
-
-		}
-
-		y=8;
-		x=0;
 		snprintf(message, sizeof(message), "Last fix: %d   ",0);
-
-
-		for (const char *p = message; *p; p++) {
-			dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
-
-		}
+		write_line(i2c_dev, message, 0, 8, 1);
 
 
 		x = 0; 
@@ -2052,16 +1732,9 @@ char message[128];
 
 		for(int i=0;i<targets_count;i++){
 
-			int heading, distance;
+			snprintf(message, sizeof(message), "%1d:     DEG  |       m", i+1);
+			write_line(i2c_dev, message, x, y, 1);
 
-
-			snprintf(message, sizeof(message), "%1d:     DEG  |       m", i+1, heading, distance);
-
-			for (const char *p = message; *p; p++) {
-				dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
-
-		}
 
 			y+= 8;
 			x = 0;
@@ -2078,11 +1751,7 @@ char message[128];
 					x=10*6;
 
 					snprintf(message, sizeof(message), "%d   ",last_fix);
-					for (const char *p = message; *p; p++) {
-						dessiner_caractere(i2c_dev, *p, x, y,1);
-						x += 6;
-
-					}
+					write_line(i2c_dev, message, x,y,1);
 		
 				}
 
@@ -2093,14 +1762,11 @@ char message[128];
 
 					if(last_tracked != gps_tracking){
 
-						snprintf(message, sizeof(message), "%2d", gps_tracking);
 
 						x=3*6;
 
-						for (const char *p = message; *p; p++) {
-							dessiner_caractere(i2c_dev, *p, x, y,1);
-							x += 6;
-						}
+						snprintf(message, sizeof(message), "%2d", gps_tracking);
+						write_line(i2c_dev, message,x,y,1);
 
 						last_tracked = gps_tracking;
 
@@ -2108,35 +1774,26 @@ char message[128];
 
 					if(last_in_fix != gps_using){
 
+						x=9*6;
 						snprintf(message, sizeof(message), "%2d", gps_using);
 
-						x=9*6;
+						write_line(i2c_dev,message,x,y,1);
 
-						for (const char *p = message; *p; p++) {
-							dessiner_caractere(i2c_dev, *p, x, y,1);
-							x += 6;
-						}
 
 						last_in_fix = gps_using;
 					}
 
 					if(last_unhealthy != gps_unk){
 
+					x=16*6;
 					snprintf(message, sizeof(message), "%2d", gps_unk);
 
+					write_line(i2c_dev,message,x,y,1);
 
-					x=16*6;
-
-					for (const char *p = message; *p; p++) {
-						dessiner_caractere(i2c_dev, *p, x, y,1);
-						x += 6;
-					}
-
-						last_unhealthy = gps_unk;
+					last_unhealthy = gps_unk;
 
 					}
 
-	//uint8_t x = 0, y = 32;
 	char linex[128];
 
 
@@ -2169,10 +1826,6 @@ char message[128];
 
 					}
 
-
-
-
-
 	if(fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
 
 		ref_latitude2 = last_latitude;
@@ -2195,40 +1848,22 @@ char message[128];
 
 			x = 3*6;
 
-
-
 			snprintf(linex, sizeof(linex), "%3d", heading);
-			for (const char *p = linex; *p; p++) {
-				dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
-			}
+			write_line(i2c_dev, linex, x, y, 1);
 
 			x = 14*6;
 			snprintf(linex, sizeof(linex), "%4d", distance);
-			for (const char *p = linex; *p; p++) {
-				dessiner_caractere(i2c_dev, *p, x, y,1);
-			x += 6;
-			}
+			write_line(i2c_dev, linex, x, y, 1);
 
 			y+= 8;
 			x = 0;
 		}
-
-
-
-
-
-
-
-
-
 
 }
 
 				}
 
 		}
-
 
 		if(tap_state == 1 || bypass == 1){
 
@@ -2244,22 +1879,15 @@ char message[128];
 
 
 
-				clear_display2(i2c_dev);
+				clear_display(i2c_dev);
 				y=0;
 
 				for(int i=0;i<nb_menu;i++){
 
 					LOG_INF("%s",menu_str[i]);
-					snprintf(message, sizeof(message), menu_str[i]);
-
-
-		
 				x = 6;
-				for (const char *p = message; *p; p++) {
-					dessiner_caractere(i2c_dev, *p, x, y,0);
-					x += 6;
-
-				}
+				snprintf(message, sizeof(message), "%s",menu_str[i]);
+				write_line(i2c_dev, message, x, y, 0);
 
 				if(i == 1){
 
@@ -2268,11 +1896,9 @@ char message[128];
 						}else{
 							snprintf(message, sizeof(message), " ON ");
 						}
-				for (const char *p = message; *p; p++) {
-					dessiner_caractere(i2c_dev, *p, x, y,0);
-					x += 6;
 
-				}
+				write_line(i2c_dev,message, 5*6,y,0);
+
 					}
 					if(i == 2){
 
@@ -2282,11 +1908,7 @@ char message[128];
 							snprintf(message, sizeof(message), " ON ");
 						}
 
-										for (const char *p = message; *p; p++) {
-					dessiner_caractere(i2c_dev, *p, x, y,0);
-					x += 6;
-
-				}
+				write_line(i2c_dev,message, 5*6,y,0);
 					}
 
 
@@ -2304,12 +1926,7 @@ char message[128];
 				snprintf(message, sizeof(message), ">");
 				x = 0;
 				y = 0;
-				for (const char *p = message; *p; p++) {
-					dessiner_caractere(i2c_dev, *p, x, y,0);
-					x += 6;
-
-				}
-
+				write_line(i2c_dev, message, x, y, 0);
 				confirmation = 0;
 
 			}
@@ -2320,33 +1937,19 @@ char message[128];
 				
 				//effacer le caractère
 				snprintf(message, sizeof(message), " ");
-				x = 0;
-				y = menu*8;
-				for (const char *p = message; *p; p++) {
-					dessiner_caractere(i2c_dev, *p, x, y,1);
-					x += 6;
+				write_line(i2c_dev, message, 0, menu*8, 1);
 
-				}
+				
 				//Changer la position
 				menu = (menu + 1 + nb_menu) % nb_menu;
 
 				//Remettre le nouveau caractère
 				snprintf(message, sizeof(message), ">");
-				x = 0;
-				y = menu*8;
-				for (const char *p = message; *p; p++) {
-					dessiner_caractere(i2c_dev, *p, x, y,0);
-					x += 6;
+				write_line(i2c_dev, message, 0, menu*8, 0);
 
-				}
-					
-
+				
 			}
 
-
-
-
-		
 		}
 
 
@@ -2372,15 +1975,15 @@ char message[128];
 							break;
 					case 1: 
 							change_gps(i2c_dev);
-									first = 0;
+							first = 0;
 							break;
 					case 2:
 							change_lte(i2c_dev);
-									first = 0;
+							first = 0;
 							break;
 					case 3:
 							reload_coordinates(i2c_dev);
-									first = 0;
+							first = 0;
 							break;
 					case 4:
 							flash_firmware();
@@ -2397,7 +2000,6 @@ char message[128];
 
 		k_sleep(K_MSEC(100));	
 		confirmation += 1;	
-
 
 	}
 
