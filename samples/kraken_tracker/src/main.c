@@ -1513,6 +1513,9 @@ void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8
 int main(void)
 {
 
+
+
+
 k_mutex_init(&lte_mutex);
 k_mutex_init(&state.mutex);
 k_condvar_init(&state.cond);
@@ -1536,7 +1539,10 @@ char message[128];
 
 
 
-	write_line(i2c_dev, "FW_VERSION 3", 0, 0, 1);
+	char build_info[32];
+
+	snprintf(build_info, sizeof(build_info), "%s %s", __DATE__, __TIME__);
+	write_line(i2c_dev, build_info, 0, 0, 1);
 	k_sleep(K_SECONDS(5));
 
 	clear_display(i2c_dev); // Efface l'écran avant de dessiner
