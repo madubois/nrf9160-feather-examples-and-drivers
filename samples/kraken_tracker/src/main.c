@@ -872,12 +872,18 @@ void send_to_cloud(){
 
 
 
-
-			lte_lc_connect();
+	int k = 0;
+	while(lte_lc_connect()!= 0) {
+		k+=1;
+		LOG_INF("Waiting for LTE connection, attempt %d", k);
+		if(k >= 5){
+			return;
+		}
+	}
 
 						LOG_INF("5");
 
-struct sockaddr_in local_addr;
+	struct sockaddr_in local_addr;
     struct addrinfo *res;
     int send_data_len;
     int num_bytes;
@@ -900,10 +906,6 @@ struct sockaddr_in local_addr;
 	
     ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
    
-
-
-	//for(int i =0;i<5;i++){
-
 
 
     int client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1014,9 +1016,14 @@ void initial_connexion(){
 
 	int err = 0;
 
-	lte_lc_connect();
-	if (err) {
-		LOG_ERR("Failed to connect to LTE network, error: %d", err);
+	int k = 0;
+	while(lte_lc_connect()!= 0) {
+		k+=1;
+				LOG_INF("Waiting for LTE connection, attempt %d", k);
+
+		if(k >= 5){
+			return;
+		}
 	}
 
 	LOG_INF("Connected to LTE network");
@@ -1152,10 +1159,15 @@ void flash_firmware(){
 
 	int err = 0;
 
-	lte_lc_connect();
-		if (err) {
-			LOG_ERR("Failed to connect to LTE network, error: %d", err);
+	int k = 0;
+	while(lte_lc_connect()!= 0) {
+		k+=1;
+				LOG_INF("Waiting for LTE connection, attempt %d", k);
+
+		if(k >= 5){
+			return;
 		}
+	}
 
 		LOG_INF("Connected to LTE network");
 
@@ -1513,19 +1525,13 @@ void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8
 int main(void)
 {
 
-
-
-
-k_mutex_init(&lte_mutex);
-k_mutex_init(&state.mutex);
-k_condvar_init(&state.cond);
-state.ready = true;
-
-
-		uint8_t x = 0, y = 0;
-
-char message[128];
-
+	k_mutex_init(&lte_mutex);
+	k_mutex_init(&state.mutex);
+	k_condvar_init(&state.cond);
+	state.ready = true;
+	uint8_t x = 0, y = 0;
+	char message[128];
+	int err;
 
 	//const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 	if (!device_is_ready(i2c_dev)) {
@@ -1538,11 +1544,8 @@ char message[128];
     ssd1306_init(i2c_dev); // <-- Ajoute cette ligne ici
 
 
-
-	char build_info[32];
-
-	snprintf(build_info, sizeof(build_info), "%s %s", __DATE__, __TIME__);
-	write_line(i2c_dev, build_info, 0, 0, 1);
+	snprintf(message, sizeof(message), "%s %s", __DATE__, __TIME__);
+	write_line(i2c_dev, message, 0, 0, 1);
 	k_sleep(K_SECONDS(5));
 
 	clear_display(i2c_dev); // Efface l'écran avant de dessiner
@@ -1557,7 +1560,6 @@ char message[128];
 	k_thread_create(&tap_data, tap_stack, 1024,tap_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
 	k_thread_create(&gps_data, gps_stack, 1024,gps_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
 
-	int err;
 
 	err = nrf_modem_lib_init();
 	if (err) {
@@ -1604,150 +1606,146 @@ char message[128];
 
 		if(first == 0){
 					
-		snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
-		write_line(i2c_dev, message, 0, 0, 0);
+			snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
+			write_line(i2c_dev, message, 0, 0, 0);
 
-		snprintf(message, sizeof(message), "LAST FIX: %d   ",0);
-		write_line(i2c_dev, message, 0, 8, 0);
+			snprintf(message, sizeof(message), "LAST FIX: %d",0);
+			write_line(i2c_dev, message, 0, 8, 0);
 
+			x = 0; 
+			y = 32;
 
-		x = 0; 
-		y = 32;
+			for(int i=0;i<targets_count;i++){
 
+				snprintf(message, sizeof(message), "%1d:",i+1);
+				write_line(i2c_dev, message, 0, y, 0);
 
-		for(int i=0;i<targets_count;i++){
+				snprintf(message, sizeof(message), "DEG");
+				write_line(i2c_dev, message, 7*6, y, 0);
 
-			snprintf(message, sizeof(message), "%1d:",i+1);
-			write_line(i2c_dev, message, 0, y, 0);
+				snprintf(message, sizeof(message), "|");
+				write_line(i2c_dev, message, 12*6, y, 0);
 
-			snprintf(message, sizeof(message), "DEG");
-			write_line(i2c_dev, message, 7*6, y, 0);
+				snprintf(message, sizeof(message), "M");
+				write_line(i2c_dev, message, 20*6, y, 0);
 
-			snprintf(message, sizeof(message), "|");
-			write_line(i2c_dev, message, 12*6, y, 0);
-
-			snprintf(message, sizeof(message), "M");
-			write_line(i2c_dev, message, 20*6, y, 0);
-
-			y+= 8;
-			x = 0;
-		}
-
-
-				}
-
-
-
-				if(last_fix != ref_lastfix){
-					ref_lastfix = last_fix;
-					y=8;
-					x=10*6;
-
-					snprintf(message, sizeof(message), "%d   ",last_fix);
-					write_line(i2c_dev, message, x,y,1);
-		
-				}
-
-				if(gps_state == 1 || first == 0){
-
-					first = 1;
-					y = 0;
-
-					if(last_tracked != gps_tracking){
-
-
-						x=3*6;
-
-						snprintf(message, sizeof(message), "%2d", gps_tracking);
-						write_line(i2c_dev, message,x,y,1);
-
-						last_tracked = gps_tracking;
-
-					}
-
-					if(last_in_fix != gps_using){
-
-						x=9*6;
-						snprintf(message, sizeof(message), "%2d", gps_using);
-
-						write_line(i2c_dev,message,x,y,1);
-
-
-						last_in_fix = gps_using;
-					}
-
-					if(last_unhealthy != gps_unk){
-
-					x=16*6;
-					snprintf(message, sizeof(message), "%2d", gps_unk);
-
-					write_line(i2c_dev,message,x,y,1);
-
-					last_unhealthy = gps_unk;
-
-					}
-
-					if(lte_state == 1 && gps_using >= 4){
-
-					if(position >= 5*20){
-
-						position = 0;
-
-						k_mutex_lock(&lte_mutex, K_SECONDS(60));
-
-						send_to_cloud();
-
-						k_mutex_unlock(&lte_mutex);
-
-					}
-
-					if((position+20) % 20 == 0){
-						ts[position/20] = timestamp;
-						lat[position/20] = last_latitude;
-						lng[position/20] = last_longitude;
-					}
-
-					position++;
-		
-
-
-					}
-
-	if(fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
-
-		ref_latitude2 = last_latitude;
-		ref_longitude2 = last_longitude;
-
-		x = 0; 
-		y = 32;
-
-		for(int i=0;i<targets_count;i++){
-
-			int heading, distance;
-
-			calcul_cap_distance_int(last_latitude, last_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
-
-			if(distance > 10000){
-				distance = 9999;
+				y+= 8;
+				x = 0;
 			}
 
 
-			x = 3*6;
-
-			snprintf(message, sizeof(message), "%3d", heading);
-			write_line(i2c_dev, message, x, y, 1);
-
-			x = 14*6;
-			snprintf(message, sizeof(message), "%4d", distance);
-			write_line(i2c_dev, message, x, y, 1);
-
-			y+= 8;
-			x = 0;
 		}
+
+		if(last_fix != ref_lastfix){
+			ref_lastfix = last_fix;
+			y=8;
+			x=10*6;
+
+			snprintf(message, sizeof(message), "%d   ",last_fix);
+			write_line(i2c_dev, message, x,y,1);
+
+		}
+
+		if(gps_state == 1 || first == 0){
+
+			first = 1;
+			y = 0;
+
+			if(last_tracked != gps_tracking){
+
+
+				x=3*6;
+
+				snprintf(message, sizeof(message), "%2d", gps_tracking);
+				write_line(i2c_dev, message,x,y,1);
+
+				last_tracked = gps_tracking;
+
+			}
+
+			if(last_in_fix != gps_using){
+
+				x=9*6;
+				snprintf(message, sizeof(message), "%2d", gps_using);
+
+				write_line(i2c_dev,message,x,y,1);
+
+
+				last_in_fix = gps_using;
+			}
+
+			if(last_unhealthy != gps_unk){
+
+			x=16*6;
+			snprintf(message, sizeof(message), "%2d", gps_unk);
+
+			write_line(i2c_dev,message,x,y,1);
+
+			last_unhealthy = gps_unk;
+
+			}
+
+			if(lte_state == 1 && gps_using >= 4){
+
+			if(position >= 5*20){
+
+				position = 0;
+
+				k_mutex_lock(&lte_mutex, K_SECONDS(60));
+
+				send_to_cloud();
+
+				k_mutex_unlock(&lte_mutex);
+
+			}
+
+			if((position+20) % 20 == 0){
+				ts[position/20] = timestamp;
+				lat[position/20] = last_latitude;
+				lng[position/20] = last_longitude;
+			}
+
+			position++;
+
+
+
+			}
+
+if(fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
+
+ref_latitude2 = last_latitude;
+ref_longitude2 = last_longitude;
+
+x = 0; 
+y = 32;
+
+for(int i=0;i<targets_count;i++){
+
+	int heading, distance;
+
+	calcul_cap_distance_int(last_latitude, last_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
+
+	if(distance > 10000){
+		distance = 9999;
+	}
+
+
+	x = 3*6;
+
+	snprintf(message, sizeof(message), "%3d", heading);
+	write_line(i2c_dev, message, x, y, 1);
+
+	x = 14*6;
+	snprintf(message, sizeof(message), "%4d", distance);
+	write_line(i2c_dev, message, x, y, 1);
+
+	y+= 8;
+	x = 0;
+}
 
 }
 
-				}
+		}
 
 		}
 
