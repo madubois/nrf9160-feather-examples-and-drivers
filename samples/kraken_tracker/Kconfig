@@ -91,6 +91,11 @@ config GNSS_SAMPLE_ASSISTANCE_MINIMAL
 
 endchoice
 
+config GNSS_SAMPLE_STRICT_GNSS_ONLY
+	bool "Force GNSS-only test mode"
+	help
+	  Disables LTE connect and A-GPS startup during bring-up so GNSS can be tested with the modem held in a non-LTE state.
+
 if !GNSS_SAMPLE_ASSISTANCE_NONE
 
 config GNSS_SAMPLE_LTE_ON_DEMAND
