@@ -41,14 +41,61 @@
 #include <zephyr/dfu/flash_img.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/reboot.h>
+#include <time.h>
 
 
 
 LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
 
+static void log_modem_state(const char *stage)
+{
+	char response[512];
+	int err;
+
+	LOG_INF("%s antenna config: COEX0=%s", stage, CONFIG_MODEM_ANTENNA_AT_COEX0);
+
+	err = nrf_modem_at_cmd(response, sizeof(response), "AT%%XSYSTEMMODE?");
+	if (err == 0) {
+		LOG_INF("%s XSYSTEMMODE: %s", stage, response);
+	} else {
+		LOG_WRN("%s XSYSTEMMODE query failed: %d", stage, err);
+	}
+
+	err = nrf_modem_at_cmd(response, sizeof(response), "AT+CFUN?");
+	if (err == 0) {
+		LOG_INF("%s CFUN: %s", stage, response);
+	} else {
+		LOG_WRN("%s CFUN query failed: %d", stage, err);
+	}
+
+	err = nrf_modem_at_cmd(response, sizeof(response), "AT%%XCOEX0?");
+	if (err == 0) {
+		LOG_INF("%s XCOEX0: %s", stage, response);
+	} else {
+		LOG_WRN("%s XCOEX0 query failed: %d", stage, err);
+	}
+
+	err = nrf_modem_at_cmd(response, sizeof(response), "AT%%XMAGPIO?");
+	if (err == 0) {
+		LOG_INF("%s XMAGPIO: %s", stage, response);
+	} else {
+		LOG_WRN("%s XMAGPIO query failed: %d", stage, err);
+	}
+
+	err = nrf_modem_at_cmd(response, sizeof(response), "AT%%XMONITOR");
+	if (err == 0) {
+		LOG_INF("%s XMONITOR: %s", stage, response);
+	} else {
+		LOG_WRN("%s XMONITOR query failed: %d", stage, err);
+	}
+}
 
 
-#define SSD1306_I2C_ADDR 0x3D // Adresse I2C typique pour SSD1306
+
+#define SSD1306_I2C_ADDR 0x3D
+#define SSD1306_WIDTH 128
+#define SSD1306_HEIGHT 64
+#define SSD1306_PAGES (SSD1306_HEIGHT / 8)
 
 // Fonction pour envoyer une commande à l'écran
 static int ssd1306_write_cmd(const struct device *i2c_dev, uint8_t cmd) {
@@ -63,12 +110,14 @@ static int ssd1306_write_data(const struct device *i2c_dev, uint8_t data) {
 }
 
 
-static uint8_t framebuffer[128][8] = {0}; // 128 colonnes x 4 pages (pour 128x32)
+static uint8_t framebuffer[SSD1306_WIDTH][SSD1306_PAGES] = {0};
+static struct k_mutex display_mutex;
 
 
 
 void allumer_pixel(const struct device *i2c_dev, uint8_t x, uint8_t y) {
-    if (x >= 128 || y >= 64) return;
+	if (x >= SSD1306_WIDTH || y >= SSD1306_HEIGHT) return;
+	k_mutex_lock(&display_mutex, K_FOREVER);
     //extern uint8_t framebuffer[128][4]; // ou déclare-le globalement
     uint8_t page = y / 8;
     uint8_t bit = y % 8;
@@ -84,11 +133,12 @@ void allumer_pixel(const struct device *i2c_dev, uint8_t x, uint8_t y) {
 
     // Écrit la page entière (tous les bits de la colonne pour cette page)
     ssd1306_write_data(i2c_dev, framebuffer[x][page]);
+	k_mutex_unlock(&display_mutex);
 }
 
 void eteindre_pixel(const struct device *i2c_dev, uint8_t x, uint8_t y) {
-    //if (x >= 128 || y >= 64) return;
-    //extern uint8_t framebuffer[128][4];
+	if (x >= SSD1306_WIDTH || y >= SSD1306_HEIGHT) return;
+	k_mutex_lock(&display_mutex, K_FOREVER);
     uint8_t page = y / 8;
     uint8_t bit = y % 8;
     framebuffer[x][page] &= ~(1 << bit);
@@ -101,14 +151,16 @@ void eteindre_pixel(const struct device *i2c_dev, uint8_t x, uint8_t y) {
     ssd1306_write_cmd(i2c_dev, page);
 
     ssd1306_write_data(i2c_dev, framebuffer[x][page]);
+	k_mutex_unlock(&display_mutex);
 }
 
 static void ssd1306_init(const struct device *i2c_dev) {
+	k_mutex_lock(&display_mutex, K_FOREVER);
     ssd1306_write_cmd(i2c_dev, 0xAE); // Display OFF
     ssd1306_write_cmd(i2c_dev, 0xD5); // Set display clock divide ratio/oscillator freq
     ssd1306_write_cmd(i2c_dev, 0x80); // Default setting for display clock divide ratio
-    ssd1306_write_cmd(i2c_dev, 0xA8); // Set multiplex ratio
-    ssd1306_write_cmd(i2c_dev, 0x3F); // 1/32 duty (0x1F pour 32 lignes)
+	ssd1306_write_cmd(i2c_dev, 0xA8); // Set multiplex ratio
+	ssd1306_write_cmd(i2c_dev, 0x3F); // 1/64 duty
     ssd1306_write_cmd(i2c_dev, 0xD3); // Set display offset
     ssd1306_write_cmd(i2c_dev, 0x00); // No offset
     ssd1306_write_cmd(i2c_dev, 0x40); // Set start line at 0
@@ -118,8 +170,8 @@ static void ssd1306_init(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0x00); // Horizontal addressing mode
     ssd1306_write_cmd(i2c_dev, 0xA0); // Set segment re-map 0 to 127
     ssd1306_write_cmd(i2c_dev, 0xC0); // Set COM output scan direction remapped
-    ssd1306_write_cmd(i2c_dev, 0xDA); // Set COM pins hardware configuration
-    ssd1306_write_cmd(i2c_dev, 0x12); // 0x02 pour 128x32 (voir datasheet)
+	ssd1306_write_cmd(i2c_dev, 0xDA); // Set COM pins hardware configuration
+	ssd1306_write_cmd(i2c_dev, 0x12); // COM config for 128x64
     ssd1306_write_cmd(i2c_dev, 0x81); // Set contrast control
     ssd1306_write_cmd(i2c_dev, 0xCF);
     ssd1306_write_cmd(i2c_dev, 0xD9); // Set pre-charge period
@@ -129,6 +181,7 @@ static void ssd1306_init(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0xA4); // Entire display ON (resume)
     ssd1306_write_cmd(i2c_dev, 0xA6); // Set normal display (not inverted)
     ssd1306_write_cmd(i2c_dev, 0xAF); // Display ON
+	k_mutex_unlock(&display_mutex);
 }
 
 // Table ASCII '0'-'9', 'A'-'Z' (0-9 puis A-Z)
@@ -232,29 +285,33 @@ static const uint8_t font_5x7[96][5] = {
 };
 
 void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t y, bool erase) {
+	if (x > (SSD1306_WIDTH - 5) || y > (SSD1306_HEIGHT - 7)) {
+		return;
+	}
 
+	ARG_UNUSED(erase);
 
-	if(erase){
-    // Effacer la zone 5x7 avant de dessiner le caractère
-    for (uint8_t col = 0; col < 5; col++) {
-        for (uint8_t row = 0; row < 7; row++) {
-            eteindre_pixel(i2c_dev, x + col, y + row);
-        }
-    }}
+	/* Affiche tout caractère ASCII 32..127 (inclus). */
+	if (c < 32 || c > 127) {
+		return;
+	}
 
+	const uint8_t *bitmap = font_5x7[c - 32];
+	for (uint8_t col = 0; col < 5; col++) {
+		uint8_t bits = bitmap[col];
+		for (uint8_t row = 0; row < 7; row++) {
+			if (bits & (1 << row)) {
+				allumer_pixel(i2c_dev, x + col, y + row);
+			} else {
+				eteindre_pixel(i2c_dev, x + col, y + row);
+			}
+		}
+	}
 
-
-    // Affiche tout caractère ASCII 32..127 (inclus)
-    if (c < 32 || c > 127) return;
-    const uint8_t *bitmap = font_5x7[c - 32];
-    for (uint8_t col = 0; col < 5; col++) {
-        uint8_t bits = bitmap[col];
-        for (uint8_t row = 0; row < 7; row++) {
-            if (bits & (1 << row)) {
-                allumer_pixel(i2c_dev, x + col, y + row);
-            }
-        }
-    }
+	/* Nettoie la colonne d'espacement pour eviter les residus entre caracteres. */
+	for (uint8_t row = 0; row < 7; row++) {
+		eteindre_pixel(i2c_dev, x + 5, y + row);
+	}
 }
 
 
@@ -291,6 +348,33 @@ void calcul_cap_distance_int(double lat1, double lon1, double lat2, double lon2,
 
 #define EARTH_RADIUS_METERS (6371.0 * 1000.0)
 
+struct shared_state {
+	struct k_mutex mutex;
+	struct k_condvar cond;
+	bool ready;
+};
+
+static struct shared_state state;
+K_SEM_DEFINE(time_sem, 0, 1);
+static struct k_work agps_data_get_work;
+static volatile bool requesting_assistance;
+static struct nrf_modem_gnss_pvt_data_frame last_pvt;
+static volatile bool gnss_has_fix;
+static bool ref_used;
+static double ref_latitude;
+static double ref_longitude;
+static int64_t fix_timestamp;
+static struct k_mutex lte_mutex;
+
+static const char *gnss_antenna_mode(void)
+{
+#if defined(CONFIG_MODEM_ANTENNA_GNSS_EXTERNAL)
+	return "external";
+#else
+	return "internal";
+#endif
+}
+
 #if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)
 static struct k_work_q gnss_work_q;
 
@@ -304,93 +388,23 @@ K_THREAD_STACK_DEFINE(gnss_workq_stack_area, GNSS_WORKQ_THREAD_STACK_SIZE);
 #include "assistance.h"
 
 static struct nrf_modem_gnss_agps_data_frame last_agps;
-static struct k_work agps_data_get_work;
-static volatile bool requesting_assistance;
-#endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE */
-
-
-static struct nrf_modem_gnss_pvt_data_frame last_pvt;
-static uint64_t fix_timestamp;
-
-/* Reference position. */
-static bool ref_used;
-static double ref_latitude;
-static double ref_longitude;
-
-K_MSGQ_DEFINE(nmea_queue, sizeof(struct nrf_modem_gnss_nmea_data_frame *), 10, 4);
-static K_SEM_DEFINE(pvt_data_sem, 0, 1);
-static K_SEM_DEFINE(time_sem, 0, 1);
-
-BUILD_ASSERT(IS_ENABLED(CONFIG_LTE_NETWORK_MODE_LTE_M_GPS) ||
-	     IS_ENABLED(CONFIG_LTE_NETWORK_MODE_NBIOT_GPS) ||
-	     IS_ENABLED(CONFIG_LTE_NETWORK_MODE_LTE_M_NBIOT_GPS),
-	     "CONFIG_LTE_NETWORK_MODE_LTE_M_GPS, "
-	     "CONFIG_LTE_NETWORK_MODE_NBIOT_GPS or "
-	     "CONFIG_LTE_NETWORK_MODE_LTE_M_NBIOT_GPS must be enabled");
-
-BUILD_ASSERT((sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) == 1 &&
-	      sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) == 1) ||
-	     (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
-	      sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE) > 1),
-	     "CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE and "
-	     "CONFIG_GNSS_SAMPLE_REFERENCE_LONGITUDE must be both either set or empty");
-
-
-
-struct shared_state {
-	struct k_mutex mutex;
-	struct k_condvar cond;
-	bool ready;
-};
-
-struct shared_state state;
-
-
 
 static void gnss_event_handler(int event)
 {
-	int retval;
-	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
-
 	switch (event) {
 	case NRF_MODEM_GNSS_EVT_PVT:
-		retval = nrf_modem_gnss_read(&last_pvt, sizeof(last_pvt), NRF_MODEM_GNSS_DATA_PVT);
-		if (retval == 0) {
-			k_sem_give(&pvt_data_sem);
-		}
-		break;
-
-
-	case NRF_MODEM_GNSS_EVT_NMEA:
-		nmea_data = k_malloc(sizeof(struct nrf_modem_gnss_nmea_data_frame));
-		if (nmea_data == NULL) {
-			LOG_ERR("Failed to allocate memory for NMEA");
-			break;
-		}
-
-		retval = nrf_modem_gnss_read(nmea_data,
-					     sizeof(struct nrf_modem_gnss_nmea_data_frame),
-					     NRF_MODEM_GNSS_DATA_NMEA);
-		if (retval == 0) {
-			retval = k_msgq_put(&nmea_queue, &nmea_data, K_NO_WAIT);
-		}
-
-		if (retval != 0) {
-			k_free(nmea_data);
-		}else{
-			LOG_ERR("NMEA NO FREE");
+		if (nrf_modem_gnss_read(&last_pvt, sizeof(last_pvt), NRF_MODEM_GNSS_DATA_PVT) == 0) {
+			k_mutex_lock(&state.mutex, K_FOREVER);
+			state.ready = true;
+			k_condvar_broadcast(&state.cond);
+			k_mutex_unlock(&state.mutex);
 		}
 		break;
 
 	case NRF_MODEM_GNSS_EVT_AGPS_REQ:
-#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE)
-		retval = nrf_modem_gnss_read(&last_agps,
-					     sizeof(last_agps),
-					     NRF_MODEM_GNSS_DATA_AGPS_REQ);
-		if (retval == 0) {
+		if (nrf_modem_gnss_read(&last_agps, sizeof(last_agps), NRF_MODEM_GNSS_DATA_AGPS_REQ) == 0) {
 			k_work_submit_to_queue(&gnss_work_q, &agps_data_get_work);
 		}
-#endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE */
 		break;
 
 	default:
@@ -398,7 +412,6 @@ static void gnss_event_handler(int event)
 	}
 }
 
-#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE)
 #if defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
 K_SEM_DEFINE(lte_ready, 0, 1);
 
@@ -417,12 +430,14 @@ static void lte_lc_event_handler(const struct lte_lc_evt *const evt)
 		break;
 	}
 }
+#endif /* CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND */
 
+#if defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
 void lte_connect(void)
 {
 	int err;
 
-	LOG_INF("Connecting to LTE network");
+	LOG_INF("Connecting to LTE network...");
 
 	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
 	if (err) {
@@ -488,6 +503,7 @@ static void agps_data_get_work_fn(struct k_work *item)
 		last_agps.data_flags);
 
 #if defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
+	k_mutex_lock(&lte_mutex, K_FOREVER);
 	lte_connect();
 #endif /* CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND */
 
@@ -498,11 +514,20 @@ static void agps_data_get_work_fn(struct k_work *item)
 
 #if defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
 	lte_disconnect();
+	k_mutex_unlock(&lte_mutex);
 #endif /* CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND */
 
 	requesting_assistance = false;
 }
 #endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE */
+
+	#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) && !defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
+	static int startup_assistance_preload(void)
+	{
+		LOG_INF("A-GPS startup preload skipped");
+		return 0;
+	}
+	#endif
 
 
 
@@ -523,8 +548,20 @@ static int modem_init(void)
 		return -1;
 	}
 
+#if defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
+	LOG_INF("Strict GNSS-only test mode: leaving LTE deactivated");
+	return 0;
+#endif
+
 #if defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
 	lte_lc_register_handler(lte_lc_event_handler);
+	lte_lc_psm_req(true);
+
+	if (lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,
+				   LTE_LC_SYSTEM_MODE_PREFER_LTEM) != 0) {
+		LOG_ERR("Failed to set LTE/GPS system mode");
+		return -1;
+	}
 #elif !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE)
 	lte_lc_psm_req(true);
 
@@ -556,7 +593,8 @@ static int sample_init(void)
 {
 	int err = 0;
 
-#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)
+#if (!defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) && !defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)) || \
+	defined(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)
 	struct k_work_queue_config cfg = {
 		.name = "gnss_work_q",
 		.no_yield = false
@@ -568,9 +606,9 @@ static int sample_init(void)
 		K_THREAD_STACK_SIZEOF(gnss_workq_stack_area),
 		GNSS_WORKQ_THREAD_PRIORITY,
 		&cfg);
-#endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE || CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST */
+	#endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE || CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST */
 
-#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE)
+#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) && !defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
 	k_work_init(&agps_data_get_work, agps_data_get_work_fn);
 
 	err = assistance_init(&gnss_work_q);
@@ -581,6 +619,8 @@ static int sample_init(void)
 
 static int gnss_init_and_start(void)
 {
+
+
 #if defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_LTE_ON_DEMAND)
 	/* Enable GNSS. */
 	if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS) != 0) {
@@ -595,12 +635,8 @@ static int gnss_init_and_start(void)
 		return -1;
 	}
 
-	/* Enable all supported NMEA messages. */
-	uint16_t nmea_mask = NRF_MODEM_GNSS_NMEA_RMC_MASK |
-			     NRF_MODEM_GNSS_NMEA_GGA_MASK |
-			     NRF_MODEM_GNSS_NMEA_GLL_MASK |
-			     NRF_MODEM_GNSS_NMEA_GSA_MASK |
-			     NRF_MODEM_GNSS_NMEA_GSV_MASK;
+	/* NMEA output is disabled because this application does not consume it. */
+	uint16_t nmea_mask = 0;
 
 	if (nrf_modem_gnss_nmea_mask_set(nmea_mask) != 0) {
 		LOG_ERR("Failed to set GNSS NMEA mask");
@@ -671,6 +707,19 @@ static int gnss_init_and_start(void)
 		return -1;
 	}
 
+
+#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) && !defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
+	/* Preload assistance at startup to improve cold-start TTFF. */
+	int preload_err = startup_assistance_preload();
+	if (preload_err) {
+		LOG_WRN("A-GPS startup preload returned error: %d", preload_err);
+	} else {
+		LOG_INF("A-GPS startup preload completed");
+	}
+#endif
+
+	log_modem_state("Before GNSS start");
+
 	if (nrf_modem_gnss_start() != 0) {
 		LOG_ERR("Failed to start GNSS");
 		return -1;
@@ -736,6 +785,65 @@ time_t ts[5];
 #define MAX_MTU_SIZE     2000
 #define RECV_BUF_SIZE    2048
 #define SEND_BUF_SIZE    MAX_MTU_SIZE
+#define MAX_DISPLAY_TARGETS 4
+
+static int displayed_targets_count = -1;
+static int displayed_heading[MAX_DISPLAY_TARGETS] = { -1, -1, -1, -1 };
+static int displayed_distance[MAX_DISPLAY_TARGETS] = { -1, -1, -1, -1 };
+
+void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8_t y, int erase);
+
+static void reset_target_value_cache(void)
+{
+	for (int i = 0; i < MAX_DISPLAY_TARGETS; i++) {
+		displayed_heading[i] = -1;
+		displayed_distance[i] = -1;
+	}
+}
+
+static void clear_target_rows(const struct device *i2c_dev)
+{
+	char blank_row[23];
+	memset(blank_row, ' ', sizeof(blank_row) - 1);
+	blank_row[sizeof(blank_row) - 1] = '\0';
+
+	for (int row = 0; row < MAX_DISPLAY_TARGETS; row++) {
+		uint8_t y = 32 + (row * 8);
+		write_line(i2c_dev, blank_row, 0, y, 0);
+	}
+}
+
+static void draw_target_rows_layout(const struct device *i2c_dev, int count)
+{
+	uint8_t y = 32;
+	char message[16];
+
+	if (count < 0) {
+		count = 0;
+	}
+	if (count > MAX_DISPLAY_TARGETS) {
+		count = MAX_DISPLAY_TARGETS;
+	}
+
+	clear_target_rows(i2c_dev);
+
+	for (int i = 0; i < count; i++) {
+		if (y > (SSD1306_HEIGHT - 8)) {
+			break;
+		}
+
+		snprintf(message, sizeof(message), "%1d:", i + 1);
+		write_line(i2c_dev, message, 0, y, 0);
+		write_line(i2c_dev, "DEG", 7 * 6, y, 0);
+		write_line(i2c_dev, "|", 12 * 6, y, 0);
+		write_line(i2c_dev, "M", 20 * 6, y, 0);
+
+		y += 8;
+	}
+
+	displayed_targets_count = count;
+	reset_target_value_cache();
+}
 
 #define JSON_TEMPLATE "%ld,%.9f,%.9f"
 #define JSON_TEMPLATE_LONG "%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f,%ld,%.9f,%.9f"
@@ -744,8 +852,6 @@ char send_buf[2000];
 
 bool gps_state = 1;
 bool lte_state = 0;
-
-struct k_mutex lte_mutex;
 time_t timestamp;
 volatile float avg = 0;
 float thresold = 19;
@@ -771,10 +877,12 @@ int nb_menu = 6;
 K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
 K_THREAD_STACK_DEFINE(tap_stack, 1024);
 K_THREAD_STACK_DEFINE(gps_stack, 1024);
+K_THREAD_STACK_DEFINE(coordinates_stack, 2048);
 
 struct k_thread accelerometer_data;
 struct k_thread tap_data;
 struct k_thread gps_data;
+struct k_thread coordinates_data;
 
 int measure_rate = 10;
 
@@ -792,20 +900,23 @@ uint32_t last_fix = 0;
 int gps_rate = 500;
 volatile int first = 0;
 uint32_t ref_lastfix = 0;
+uint32_t last_gnss_diag = 0;
+volatile bool gnss_display_dirty = true;
 
 
 
 
 
 void clear_display(const struct device *i2c_dev) {
+	k_mutex_lock(&display_mutex, K_FOREVER);
     // 1. Efface le framebuffer RAM
     memset(framebuffer, 0, sizeof(framebuffer));
 
     // 2. Pour chaque page, envoie 128 zéros d'un coup
-    for (uint8_t page = 0; page < 8; page++) {
+	for (uint8_t page = 0; page < SSD1306_PAGES; page++) {
         ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
         ssd1306_write_cmd(i2c_dev, 0);    // Start column
-        ssd1306_write_cmd(i2c_dev, 127);  // End column
+		ssd1306_write_cmd(i2c_dev, SSD1306_WIDTH - 1);  // End column
         ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
         ssd1306_write_cmd(i2c_dev, page); // Start page
         ssd1306_write_cmd(i2c_dev, page); // End page
@@ -813,28 +924,29 @@ void clear_display(const struct device *i2c_dev) {
         // Envoie 128 octets d'un coup (plus rapide que 128 appels séparés)
         uint8_t buf[129];
         buf[0] = 0x40; // Control byte for data
-        memset(&buf[1], 0, 128);
+		memset(&buf[1], 0, SSD1306_WIDTH);
         i2c_write(i2c_dev, buf, sizeof(buf), SSD1306_I2C_ADDR);
     }
+	k_mutex_unlock(&display_mutex);
 }
 
 void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
-	uint8_t tracked   = 0;
-	uint8_t in_fix    = 0;
+	uint8_t tracked = 0;
+	uint8_t in_fix = 0;
 	uint8_t unhealthy = 0;
 
 	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; ++i) {
-		if (pvt_data->sv[i].sv > 0) {
-			tracked++;
+		if (pvt_data->sv[i].sv <= 0) {
+			continue;
+		}
 
-			if (pvt_data->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
-				in_fix++;
-			}
-
-			if (pvt_data->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_UNHEALTHY) {
-				unhealthy++;
-			}
+		tracked++;
+		if (pvt_data->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
+			in_fix++;
+		}
+		if (pvt_data->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_UNHEALTHY) {
+			unhealthy++;
 		}
 	}
 
@@ -842,159 +954,12 @@ void print_satellite_stats(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	gps_using = in_fix;
 	gps_unk = unhealthy;
 
-
-}
-
-int blocking_send(int fd, uint8_t *buf, uint32_t size, uint32_t flags)
-{
-    int err;
-
-    do {
-        err = send(fd, buf, size, flags);
-    } while (err < 0 && (errno == EAGAIN));
-
-    return err;
-}
-
-int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
-{
-    int err;
-
-    do {
-        err = connect(fd, local_addr, len);
-		LOG_INF("ERROR CONNECT = %d", err);
-    } while (err < 0 && errno == EAGAIN);
-
-    return err;
-}
-
-void send_to_cloud(){
-
-
-
-	int k = 0;
-	while(lte_lc_connect()!= 0) {
-		k+=1;
-		LOG_INF("Waiting for LTE connection, attempt %d", k);
-		if(k >= 5){
-			return;
-		}
-	}
-
-						LOG_INF("5");
-
-	struct sockaddr_in local_addr;
-    struct addrinfo *res;
-    int send_data_len;
-    int num_bytes;
-   
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_port = htons(0);
-    local_addr.sin_addr.s_addr = 0;
-
-
-	struct addrinfo hints = {
-		.ai_family = AF_INET,       //1
-		.ai_socktype = SOCK_DGRAM,  //2
-        .ai_next = NULL,
-        .ai_addr = NULL,
-        .ai_protocol = 0   //any protocol
-	};
-
-    int err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
-    LOG_INF("getaddrinfo err: %d", err);
-	
-    ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
-   
-
-
-    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-    LOG_INF("client_fd: %d", client_fd);
-    err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
-    LOG_INF("bind err: %d", err);
-
-
-    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
-    LOG_INF("connect err: %d", err);
-
-
-	if (err >= 0) {
-
-    LOG_INF("Prepare send buffer:");
-	
-	
-	send_data_len = snprintf(send_buf, 2000,
-									"POST %s HTTP/1.1\r\n"
-                                    "Host: %s\r\n\r\n"
-									JSON_TEMPLATE_LONG,
-									HTTP_PATH_LONG, HTTP_HOST,
-									(long)ts[0], lat[0], lng[0],
-									(long)ts[1], lat[1], lng[1],
-									(long)ts[2], lat[2], lng[2],
-									(long)ts[3], lat[3], lng[3],
-									(long)ts[4], lat[4], lng[4]);
-
-
-
-    do {
-        num_bytes =
-        blocking_send(client_fd, send_buf, send_data_len, 0);
-       
-        if (num_bytes < 0) {
-            LOG_INF("ret: %d, errno: %s\n", num_bytes, strerror(errno));
-        };
-		
-
-    } while (num_bytes < 0);
-
-
-    LOG_INF("Finished. Closing socket");
-    err = close(client_fd);
-
-}
-
-    freeaddrinfo(res);
-int ret;
-  ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
-
-
-    if (ret) {
-        LOG_ERR("Failed to disconnect from LTE network");
-    } else {
-        LOG_INF("Disconnected from LTE network");
-    }
-
-
+	LOG_INF("GNSS searching: tracked=%u used=%u unhealthy=%u", tracked, in_fix, unhealthy);
 }
 
 void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 {
-/*
-	
-	printf("Latitude:       %.06f\n", pvt_data->latitude);
-	printf("Longitude:      %.06f\n", pvt_data->longitude);
-	printf("Altitude:       %.01f m\n", pvt_data->altitude);
-	printf("Accuracy:       %.01f m\n", pvt_data->accuracy);
-	printf("Speed:          %.01f m/s\n", pvt_data->speed);
-	printf("Speed accuracy: %.01f m/s\n", pvt_data->speed_accuracy);
-	printf("Heading:        %.01f deg\n", pvt_data->heading);
-	printf("Date:           %04u-%02u-%02u\n",
-	       pvt_data->datetime.year,
-	       pvt_data->datetime.month,
-	       pvt_data->datetime.day);
-	printf("Time (UTC):     %02u:%02u:%02u.%03u\n",
-	       pvt_data->datetime.hour,
-	       pvt_data->datetime.minute,
-	       pvt_data->datetime.seconds,
-	       pvt_data->datetime.ms);
-	printf("PDOP:           %.01f\n", pvt_data->pdop);
-	printf("HDOP:           %.01f\n", pvt_data->hdop);
-	printf("VDOP:           %.01f\n", pvt_data->vdop);
-	printf("TDOP:           %.01f\n", pvt_data->tdop);
-*/
-
-	struct tm tm;
+	struct tm tm = { 0 };
 
 	tm.tm_year = pvt_data->datetime.year - 1900;
 	tm.tm_mon = pvt_data->datetime.month - 1;
@@ -1004,29 +969,39 @@ void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	tm.tm_sec = pvt_data->datetime.seconds;
 	tm.tm_isdst = 0;
 
+	timestamp = mktime(&tm);
+	last_latitude = pvt_data->latitude;
+	last_longitude = pvt_data->longitude;
+}
 
-		timestamp = mktime(&tm);
+void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8_t y, int erase);
 
-		last_latitude = pvt_data->latitude;
-		last_longitude = pvt_data->longitude;
+int blocking_send(int fd, uint8_t *buf, uint32_t size, uint32_t flags)
+{
+	int err;
 
-		}
+	do {
+		err = send(fd, buf, size, flags);
+	} while (err < 0 && errno == EAGAIN);
+
+	return err;
+}
+
+int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
+{
+	int err;
+
+	do {
+		err = connect(fd, local_addr, len);
+	} while (err < 0 && errno == EAGAIN);
+
+	return err;
+}
 
 void initial_connexion(){
+	LOG_INF("initial_connexion: begin fetching targets");
 
 	int err = 0;
-
-	int k = 0;
-	while(lte_lc_connect()!= 0) {
-		k+=1;
-				LOG_INF("Waiting for LTE connection, attempt %d", k);
-
-		if(k >= 5){
-			return;
-		}
-	}
-
-	LOG_INF("Connected to LTE network");
 
 	struct sockaddr_in local_addr;
     struct addrinfo *res;
@@ -1039,15 +1014,18 @@ void initial_connexion(){
 
 
 	struct addrinfo hints = {
-		.ai_family = AF_INET,       //1
-		.ai_socktype = SOCK_DGRAM,  //2
+		.ai_family = AF_INET,
+		.ai_socktype = SOCK_DGRAM,
         .ai_next = NULL,
         .ai_addr = NULL,
-        .ai_protocol = 0   //any protocol
+		.ai_protocol = 0,
 	};
 
     err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
     LOG_INF("getaddrinfo err: %d", err);
+	if (err != 0) {
+		return;
+	}
 	
     ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
    
@@ -1055,6 +1033,10 @@ void initial_connexion(){
     int client_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     LOG_INF("client_fd: %d", client_fd);
+	if (client_fd < 0) {
+		freeaddrinfo(res);
+		return;
+	}
     err = bind(client_fd, (struct sockaddr *)&local_addr,sizeof(local_addr));
     LOG_INF("bind err: %d", err);
 
@@ -1064,15 +1046,6 @@ void initial_connexion(){
 
 
 	if (err >= 0) {
-
-    LOG_INF("Prepare send buffer:");
-
-	
-	uint8_t x = 0, y = 8;
-
-	char line[128];
-	snprintf(line,sizeof(line),"CONNECTING...");
-	write_line(i2c_dev, line, x,y,0);
 
 
 	send_data_len = snprintf(send_buf, 2000,
@@ -1093,50 +1066,76 @@ void initial_connexion(){
 
     } while (num_bytes < 0);
 
-	char recv_buf[RECV_BUF_SIZE] = {0};
+	static char recv_buf[RECV_BUF_SIZE * 2];
+	memset(recv_buf, 0, sizeof(recv_buf));
 	int tot_num_bytes = 0;
+	int recv_offset = 0;
+	struct timeval recv_timeout = {
+		.tv_sec = 5,
+		.tv_usec = 0,
+	};
+	setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
 
 	do {
 		/* TODO: make a proper timeout *
 		 * Current solution will just hang 
 		 * until remote side closes connection */
-		num_bytes = recv(client_fd, recv_buf, RECV_BUF_SIZE, 0);
-		tot_num_bytes += num_bytes;
+		num_bytes = recv(client_fd, recv_buf + recv_offset,
+				 sizeof(recv_buf) - recv_offset - 1, 0);
+		if (num_bytes > 0) {
+			tot_num_bytes += num_bytes;
+		}
                 LOG_INF("total number of bytes: %d\n", tot_num_bytes);
                 LOG_INF("num bytes: %d\n", num_bytes);
 		if (num_bytes < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				LOG_INF("recv timeout after %d bytes", tot_num_bytes);
+				break;
+			}
 			LOG_INF("\nrecv errno: %d\n", errno);
 			break;
 		}
+		if (num_bytes == 0) {
+			break;
+		}
+		recv_offset += num_bytes;
+		recv_buf[recv_offset] = '\0';
 		//LOG_INF("%s\n", recv_buf);
 	} while (num_bytes > 0);
 
 
     double values[10];                       // Tableau pour stocker les doubles
     size_t count = 0;
+	char *body = strstr(recv_buf, "\r\n\r\n");
+	if (body != NULL) {
+		body += 4;
+	} else {
+		body = recv_buf;
+	}
 
+	LOG_INF("Targets response body starts with: %.80s", body);
 
-    char *token = strtok(recv_buf, ",");
-    while (token != NULL && count < 10) {
-        values[count] = strtod(token, NULL);  // Conversion vers double
-        count++;
-        token = strtok(NULL, ",");
-    }
+	char *scan = body;
+	while (*scan != '\0' && count < 10) {
+		char *endptr;
+		double parsed = strtod(scan, &endptr);
 
-	targets_count = (count/2);
+		if (endptr == scan) {
+			scan++;
+			continue;
+		}
 
-		x = 0;
-		y = 16;
+		values[count] = parsed;
+		count++;
+		scan = endptr;
+	}
 
-		if(targets_count <= 1){
-			snprintf(line, sizeof(line),"%d TARGET",targets_count);
-
-		}else{
-			snprintf(line, sizeof(line),"%d TARGETS",targets_count);
-
-		}	
-
-		write_line(i2c_dev, line, x, y,0);
+	targets_count = (count / 2);
+	if (targets_count > MAX_DISPLAY_TARGETS) {
+		LOG_WRN("Parsed %u targets; clamping display to %u", targets_count, MAX_DISPLAY_TARGETS);
+		targets_count = MAX_DISPLAY_TARGETS;
+	}
+	LOG_INF("Parsed %u coordinate pairs from server", targets_count);
 
 
     // Afficher les résultats
@@ -1146,13 +1145,11 @@ void initial_connexion(){
 
     LOG_INF("Finished. Closing socket");
     err = close(client_fd);
+	    LOG_INF("initial_connexion: socket closed");
+	    freeaddrinfo(res);
+	    LOG_INF("initial_connexion: done");
 
-}
-
-    freeaddrinfo(res);
-	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
-	lte_state = 0;
-
+	}
 }
 
 void flash_firmware(){
@@ -1261,10 +1258,15 @@ void flash_firmware(){
 		printk("Erreur flush final: %d\n", err);
 	}
 
-	boot_request_upgrade(BOOT_SWAP_TYPE_PERM);
-	sys_reboot(SYS_REBOOT_COLD);
+	LOG_WRN("Firmware image written; reboot disabled during diagnostics");
+	return;
 
 
+}
+
+void send_to_cloud(void)
+{
+	LOG_INF("send_to_cloud: skipped during LTE diagnostics");
 }
 
 float sensor_value_to_float(const struct sensor_value *val)
@@ -1346,26 +1348,34 @@ k_mutex_unlock(&state.mutex);
 
 
 	LOG_INF("GPS");
-
-
-			k_mutex_lock(&lte_mutex, K_FOREVER);
-
-
 			print_satellite_stats(&last_pvt);
 
 			if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+							gnss_has_fix = true;
 							fix_timestamp = k_uptime_get();
 							print_fix_data(&last_pvt);
+								last_fix = 0;
+								gnss_display_dirty = true;
 							//print_distance_from_reference(&last_pvt);
 
 
 						} else {
 
 							last_fix = (uint32_t)((k_uptime_get() - fix_timestamp) / 1000);
+							gnss_display_dirty = true;
+
+							if ((k_uptime_get_32() - last_gnss_diag) >= 5000U) {
+								LOG_WRN("GNSS searching: tracked=%u used=%u unhealthy=%u last_fix=%us antenna=%s",
+									gps_tracking,
+									gps_using,
+									gps_unk,
+									last_fix,
+									gnss_antenna_mode());
+								last_gnss_diag = k_uptime_get_32();
+							}
 
 						}
 
-								k_mutex_unlock(&lte_mutex);
 	k_sleep(K_MSEC(gps_rate));
 
 }
@@ -1429,9 +1439,6 @@ void reload_coordinates(const struct device *i2c_dev){
 	write_line(i2c_dev, line, x, y, 0);
 
 
-	lte_lc_init();
-	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
-
 	initial_connexion();
 
 	menu = -2;
@@ -1441,6 +1448,32 @@ void reload_coordinates(const struct device *i2c_dev){
 
 }
 
+
+void coordinates_thread(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	k_sleep(K_SECONDS(2));
+
+	while (1) {
+		k_mutex_lock(&lte_mutex, K_FOREVER);
+		lte_connect();
+		LOG_INF("coordinates_thread: starting coordinates fetch");
+		initial_connexion();
+		lte_disconnect();
+		k_mutex_unlock(&lte_mutex);
+
+		if (targets_count > 0) {
+			LOG_INF("coordinates_thread: loaded %d targets", targets_count);
+			break;
+		}
+
+		LOG_WRN("coordinates_thread: no targets yet, retrying in 60s");
+		k_sleep(K_SECONDS(60));
+	}
+}
 void firmware_update(const struct device *i2c_dev){
 
 
@@ -1471,9 +1504,6 @@ if(lte_state == 0){return; }
 
 
 
-	lte_lc_init();
-	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
-
 	flash_firmware();
 
 
@@ -1484,11 +1514,15 @@ if(lte_state == 0){return; }
 }
 
 void ssd1306_power_off(const struct device *i2c_dev) {
+	k_mutex_lock(&display_mutex, K_FOREVER);
     ssd1306_write_cmd(i2c_dev, 0xAE); // Display OFF
+	k_mutex_unlock(&display_mutex);
 }
 
 void ssd1306_power_on(const struct device *i2c_dev) {
+	k_mutex_lock(&display_mutex, K_FOREVER);
     ssd1306_write_cmd(i2c_dev, 0xAF); // Display ON
+	k_mutex_unlock(&display_mutex);
 }
 
 void off(const struct device *i2c_dev){
@@ -1516,15 +1550,25 @@ void off(const struct device *i2c_dev){
 }
 
 void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8_t y, int erase) {
+	if (y > (SSD1306_HEIGHT - 7)) {
+		return;
+	}
+
+	int cursor = x;
 	for (const char *p = line; *p; p++) {
-		dessiner_caractere(i2c_dev, *p, x, y, erase);
-		x += 6;
+		if (cursor > (SSD1306_WIDTH - 5)) {
+			break;
+		}
+
+		dessiner_caractere(i2c_dev, *p, (uint8_t)cursor, y, erase);
+		cursor += 6;
 	}
 }
 
 int main(void)
 {
 
+	k_mutex_init(&display_mutex);
 	k_mutex_init(&lte_mutex);
 	k_mutex_init(&state.mutex);
 	k_condvar_init(&state.cond);
@@ -1532,13 +1576,17 @@ int main(void)
 	uint8_t x = 0, y = 0;
 	char message[128];
 	int err;
+	bool home_screen_cleared = false;
 
 	//const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 	if (!device_is_ready(i2c_dev)) {
 		LOG_ERR("I2C device not ready");
-		sys_reboot(SYS_REBOOT_COLD);
+		while (true) {
+			k_sleep(K_SECONDS(1));
+		}
 	}
 	LOG_INF("I2C device is ready");
+	LOG_INF("GNSS antenna mode: %s", gnss_antenna_mode());
 
 	clear_display(i2c_dev); // Efface l'écran avant de dessiner
     ssd1306_init(i2c_dev); // <-- Ajoute cette ligne ici
@@ -1548,12 +1596,22 @@ int main(void)
 	write_line(i2c_dev, message, 0, 0, 1);
 	k_sleep(K_SECONDS(5));
 
-	clear_display(i2c_dev); // Efface l'écran avant de dessiner
+	clear_display(i2c_dev);
+	snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
+	write_line(i2c_dev, message, 0, 0, 0);
+	snprintf(message, sizeof(message), "LAST FIX: %d", 0);
+	write_line(i2c_dev, message, 0, 8, 0);
+	snprintf(message, sizeof(message), "                ");
+	write_line(i2c_dev, message, 0, 32, 0);
+	home_screen_cleared = true;
+	first = 0;
 
     const struct device *lis2dh = DEVICE_DT_GET_ONE(st_lis2dh);
     if (!device_is_ready(lis2dh)) {
         LOG_ERR("Erreur : LIS2DH non prêt\n");
-        sys_reboot(SYS_REBOOT_COLD);
+		while (true) {
+			k_sleep(K_SECONDS(1));
+		}
     }
 
 	k_thread_create(&accelerometer_data, accelerometer_stack, 1024,accelerometer_thread, (void *)lis2dh, NULL, NULL,5, 0, K_NO_WAIT);
@@ -1564,11 +1622,12 @@ int main(void)
 	err = nrf_modem_lib_init();
 	if (err) {
 		LOG_ERR("Modem library initialization failed, error: %d", err);
-		sys_reboot(SYS_REBOOT_COLD);
+		while (true) {
+			k_sleep(K_SECONDS(1));
+		}
 	}
 
-	lte_lc_init();
-	lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM_GPS,LTE_LC_SYSTEM_MODE_PREFER_LTEM);
+	log_modem_state("After modem init");
 
 	/* Initialize reference coordinates (if used). */
 	if (sizeof(CONFIG_GNSS_SAMPLE_REFERENCE_LATITUDE) > 1 &&
@@ -1580,22 +1639,31 @@ int main(void)
 
 	if (modem_init() != 0) {
 		LOG_ERR("Failed to initialize modem");
-		sys_reboot(SYS_REBOOT_COLD);
+		while (true) {
+			k_sleep(K_SECONDS(1));
+		}
 	}
 
 	if (sample_init() != 0) {
 		LOG_ERR("Failed to initialize sample");
-		sys_reboot(SYS_REBOOT_COLD);
+		while (true) {
+			k_sleep(K_SECONDS(1));
+		}
 	}
+
+	LOG_INF("main: starting coordinates thread");
+	k_thread_create(&coordinates_data, coordinates_stack, K_THREAD_STACK_SIZEOF(coordinates_stack),
+			coordinates_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
 
 	if (gnss_init_and_start() != 0) {
 		LOG_ERR("Failed to initialize and start GNSS");
-		sys_reboot(SYS_REBOOT_COLD);
+		while (true) {
+			k_sleep(K_SECONDS(1));
+		}
 	}
 
+	LOG_INF("main: starting initial coordinates fetch");
 	fix_timestamp = k_uptime_get();
-
-	lte_lc_init();
 
 	multitap = 0;
 	int confirmation = 0;
@@ -1603,37 +1671,32 @@ int main(void)
 	while(true){
 
 	if(menu == -1){
+		int visible_targets = targets_count;
+		if (visible_targets > MAX_DISPLAY_TARGETS) {
+			visible_targets = MAX_DISPLAY_TARGETS;
+		}
+
+		if (!home_screen_cleared) {
+			clear_display(i2c_dev);
+			home_screen_cleared = true;
+		}
 
 		if(first == 0){
 					
+			clear_display(i2c_dev);
 			snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
 			write_line(i2c_dev, message, 0, 0, 0);
 
 			snprintf(message, sizeof(message), "LAST FIX: %d",0);
 			write_line(i2c_dev, message, 0, 8, 0);
-
-			x = 0; 
-			y = 32;
-
-			for(int i=0;i<targets_count;i++){
-
-				snprintf(message, sizeof(message), "%1d:",i+1);
-				write_line(i2c_dev, message, 0, y, 0);
-
-				snprintf(message, sizeof(message), "DEG");
-				write_line(i2c_dev, message, 7*6, y, 0);
-
-				snprintf(message, sizeof(message), "|");
-				write_line(i2c_dev, message, 12*6, y, 0);
-
-				snprintf(message, sizeof(message), "M");
-				write_line(i2c_dev, message, 20*6, y, 0);
-
-				y+= 8;
-				x = 0;
-			}
+			draw_target_rows_layout(i2c_dev, visible_targets);
 
 
+		}
+
+		if (displayed_targets_count != visible_targets) {
+			draw_target_rows_layout(i2c_dev, visible_targets);
+			gnss_display_dirty = true;
 		}
 
 		if(last_fix != ref_lastfix){
@@ -1711,15 +1774,20 @@ int main(void)
 
 			}
 
-if(fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
+		if(gnss_display_dirty || fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
 
 ref_latitude2 = last_latitude;
 ref_longitude2 = last_longitude;
+			gnss_display_dirty = false;
 
-x = 0; 
+x = 0;
 y = 32;
 
-for(int i=0;i<targets_count;i++){
+for(int i=0;i<visible_targets;i++){
+
+	if (y > (SSD1306_HEIGHT - 8)) {
+		break;
+	}
 
 	int heading, distance;
 
@@ -1731,13 +1799,18 @@ for(int i=0;i<targets_count;i++){
 
 
 	x = 3*6;
-
-	snprintf(message, sizeof(message), "%3d", heading);
-	write_line(i2c_dev, message, x, y, 1);
+	if (displayed_heading[i] != heading) {
+		snprintf(message, sizeof(message), "%3d", heading);
+		write_line(i2c_dev, message, x, y, 1);
+		displayed_heading[i] = heading;
+	}
 
 	x = 14*6;
-	snprintf(message, sizeof(message), "%4d", distance);
-	write_line(i2c_dev, message, x, y, 1);
+	if (displayed_distance[i] != distance) {
+		snprintf(message, sizeof(message), "%4d", distance);
+		write_line(i2c_dev, message, x, y, 1);
+		displayed_distance[i] = distance;
+	}
 
 	y+= 8;
 	x = 0;
@@ -1861,7 +1934,7 @@ for(int i=0;i<targets_count;i++){
 							first = 0;
 							break;
 					case 4:
-							flash_firmware();
+							LOG_WRN("Firmware update disabled during diagnostics");
 							break;
 					case 5:
 							off(i2c_dev);
