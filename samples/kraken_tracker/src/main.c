@@ -1023,6 +1023,10 @@ static volatile int64_t off_wake_first_motion_ms;
 static volatile int64_t off_wake_last_motion_ms;
 static volatile int off_wake_poll_streak;
 static volatile bool off_wake_probe_active;
+static volatile int64_t menu_wake_first_motion_ms;
+static volatile int64_t menu_wake_last_motion_ms;
+static volatile int menu_wake_poll_streak;
+static volatile bool menu_wake_probe_active;
 static const float off_wake_start_threshold_ms2 = 1.20f;
 static const float off_wake_hold_threshold_ms2 = 0.60f;
 static const int off_wake_hold_ms = 700;
@@ -1087,6 +1091,62 @@ static void off_wake_reset_motion(void)
 	off_wake_last_motion_ms = 0;
 	off_wake_poll_streak = 0;
 	off_wake_probe_active = false;
+}
+
+static bool menu_wake_register_motion(int64_t now_ms)
+{
+	int64_t previous_motion_ms;
+
+	previous_motion_ms = menu_wake_last_motion_ms;
+	if (menu_wake_first_motion_ms == 0 ||
+	    (now_ms - previous_motion_ms) > off_wake_event_gap_ms) {
+		menu_wake_first_motion_ms = now_ms;
+		menu_wake_last_motion_ms = now_ms;
+		return false;
+	}
+
+	menu_wake_last_motion_ms = now_ms;
+
+	return (now_ms - menu_wake_first_motion_ms) >= off_wake_hold_ms;
+}
+
+static void menu_wake_reset_motion(void)
+{
+	menu_wake_first_motion_ms = 0;
+	menu_wake_last_motion_ms = 0;
+	menu_wake_poll_streak = 0;
+	menu_wake_probe_active = false;
+}
+
+static bool menu_wake_poll_motion(int64_t now_ms)
+{
+	float linear_mag;
+	float lx = linear_x;
+	float ly = linear_y;
+	float lz = linear_z;
+
+	linear_mag = sqrtf((lx * lx) + (ly * ly) + (lz * lz));
+
+	if (linear_mag < off_wake_start_threshold_ms2) {
+		menu_wake_reset_motion();
+		return false;
+	}
+
+	if (!menu_wake_probe_active) {
+		menu_wake_probe_active = true;
+	}
+
+	if (linear_mag < off_wake_hold_threshold_ms2) {
+		menu_wake_reset_motion();
+		menu_wake_probe_active = true;
+		return false;
+	}
+
+	if (++menu_wake_poll_streak < 4) {
+		return false;
+	}
+
+	return menu_wake_register_motion(now_ms);
 }
 
 static bool off_wake_poll_motion(int64_t now_ms)
@@ -2171,6 +2231,10 @@ void off(const struct device *i2c_dev){
 	err = gnss_init_and_start();
 	if (err != 0) {
 		LOG_ERR("Failed to restart GNSS after deep sleep");
+		startup_stage = STARTUP_STAGE_ERROR;
+	} else {
+		/* OFF wake is a runtime resume, not a fresh startup sequence. */
+		startup_stage = (targets_count > 0) ? STARTUP_STAGE_READY : STARTUP_STAGE_RETRY;
 	}
 
 	k_mutex_lock(&state.mutex, K_FOREVER);
@@ -2220,6 +2284,7 @@ static void open_menu(const struct device *i2c_dev)
 {
 	menu = 0;
 	menu_confirm_after_ms = k_uptime_get() + tap_menu_confirm_guard_ms;
+	menu_wake_reset_motion();
 	draw_menu_screen(i2c_dev);
 }
 
@@ -2648,6 +2713,17 @@ for(int i=0;i<visible_targets;i++){
 
 		}
 
+		if (menu == -1 && k_uptime_get() >= tap_accept_after_ms) {
+			if (menu_wake_poll_motion(k_uptime_get())) {
+				LOG_INF("GOING IN THE MENU");
+				open_menu(i2c_dev);
+				k_sleep(K_MSEC(100));
+				continue;
+			}
+		} else {
+			menu_wake_reset_motion();
+		}
+
 		enum tap_direction tap = pop_tap_event();
 		if (tap != TAP_NONE) {
 			if (k_uptime_get() < tap_accept_after_ms) {
@@ -2655,20 +2731,15 @@ for(int i=0;i<visible_targets;i++){
 				continue;
 			}
 
-			if (menu == -1) {
-				if (tap == TAP_LEFT || tap == TAP_RIGHT) {
-					LOG_INF("GOING IN THE MENU");
-					open_menu(i2c_dev);
-				}
-			} else {
+			if (menu != -1) {
 				switch (tap) {
 				case TAP_UP:
-					/* Haut physique: remonter le curseur dans la liste. */
-					move_menu_cursor(i2c_dev, -1);
+					/* Haut physique: descendre le curseur dans la liste. */
+					move_menu_cursor(i2c_dev, +1);
 					break;
 				case TAP_DOWN:
-					/* Bas physique: descendre le curseur. */
-					move_menu_cursor(i2c_dev, +1);
+					/* Bas physique: remonter le curseur. */
+					move_menu_cursor(i2c_dev, -1);
 					break;
 				case TAP_LEFT:
 					/* Gauche physique: confirmer/entrer. */
