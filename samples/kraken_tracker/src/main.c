@@ -1911,26 +1911,52 @@ void ssd1306_power_on(const struct device *i2c_dev) {
 }
 
 void off(const struct device *i2c_dev){
-	ARG_UNUSED(i2c_dev);
-	LOG_WRN("OFF action temporarily disabled for display diagnostics");
+	int err;
+
+	LOG_WRN("Entering deep sleep mode");
 	menu = -1;
 	first = 0;
-	return;
+	gps_capture_mode = GPS_CAPTURE_DORMANT;
+	gps_seen_fix_since_reactivate = false;
+	active_point_valid = false;
+	last_new_point_ms = 0;
+	gnss_display_dirty = true;
+	last_tracked = 0xFF;
+	last_in_fix = 0xFF;
+	last_unhealthy = 0xFF;
 
 	k_mutex_lock(&state.mutex, K_FOREVER);
 	state.ready = false;
 	k_mutex_unlock(&state.mutex);
 
+	if (nrf_modem_gnss_stop() != 0) {
+		LOG_WRN("Failed to stop GNSS before deep sleep");
+	}
+	lte_disconnect();
+	lte_state = 0;
+
 	ssd1306_power_off(i2c_dev);
 
 	while (!pop_wake_request()) {
-
-
-		k_sleep(K_SECONDS(5));
-
+		k_sleep(K_MSEC(100));
 	}
 
+	LOG_WRN("Waking from deep sleep");
 	ssd1306_power_on(i2c_dev);
+	clear_display(i2c_dev);
+
+	gps_capture_mode = GPS_CAPTURE_REACTIVATING;
+	gps_seen_fix_since_reactivate = false;
+	active_point_valid = false;
+	last_new_point_ms = 0;
+	last_fix = 0;
+	startup_stage = STARTUP_STAGE_GNSS_WARMUP;
+	gnss_display_dirty = true;
+
+	err = gnss_init_and_start();
+	if (err != 0) {
+		LOG_ERR("Failed to restart GNSS after deep sleep");
+	}
 
 	k_mutex_lock(&state.mutex, K_FOREVER);
 	state.ready = true;
