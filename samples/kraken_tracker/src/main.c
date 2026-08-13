@@ -43,6 +43,8 @@
 #include <zephyr/sys/reboot.h>
 #include <time.h>
 
+#include "battery.h"
+
 
 
 LOG_MODULE_REGISTER(gnss_sample, CONFIG_GNSS_SAMPLE_LOG_LEVEL);
@@ -107,6 +109,19 @@ static int ssd1306_write_cmd(const struct device *i2c_dev, uint8_t cmd) {
 static int ssd1306_write_data(const struct device *i2c_dev, uint8_t data) {
     uint8_t buf[2] = {0x40, data}; // 0x40 = Control byte pour data
     return i2c_write(i2c_dev, buf, 2, SSD1306_I2C_ADDR);
+}
+
+static int ssd1306_write_data_block(const struct device *i2c_dev, const uint8_t *data, size_t len)
+{
+	uint8_t buf[1 + 6];
+
+	if (len > 6) {
+		return -EINVAL;
+	}
+
+	buf[0] = 0x40;
+	memcpy(&buf[1], data, len);
+	return i2c_write(i2c_dev, buf, len + 1, SSD1306_I2C_ADDR);
 }
 
 
@@ -285,7 +300,7 @@ static const uint8_t font_5x7[96][5] = {
 };
 
 void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t y, bool erase) {
-	if (x > (SSD1306_WIDTH - 5) || y > (SSD1306_HEIGHT - 7)) {
+	if (x > (SSD1306_WIDTH - 6) || y > (SSD1306_HEIGHT - 7)) {
 		return;
 	}
 
@@ -297,6 +312,34 @@ void dessiner_caractere(const struct device *i2c_dev, char c, uint8_t x, uint8_t
 	}
 
 	const uint8_t *bitmap = font_5x7[c - 32];
+
+	/* Fast path: one page-aligned character can be pushed as one contiguous I2C block. */
+	if ((y % 8U) == 0U) {
+		uint8_t page = y / 8U;
+		uint8_t glyph[6];
+
+		for (uint8_t col = 0; col < 5; col++) {
+			glyph[col] = bitmap[col];
+		}
+		glyph[5] = 0x00;
+
+		k_mutex_lock(&display_mutex, K_FOREVER);
+		for (uint8_t col = 0; col < 6; col++) {
+			framebuffer[x + col][page] = glyph[col];
+		}
+
+		ssd1306_write_cmd(i2c_dev, 0x21);
+		ssd1306_write_cmd(i2c_dev, x);
+		ssd1306_write_cmd(i2c_dev, x + 5);
+		ssd1306_write_cmd(i2c_dev, 0x22);
+		ssd1306_write_cmd(i2c_dev, page);
+		ssd1306_write_cmd(i2c_dev, page);
+		ssd1306_write_data_block(i2c_dev, glyph, sizeof(glyph));
+		k_mutex_unlock(&display_mutex);
+		return;
+	}
+
+	/* Fallback for non-page-aligned rendering. */
 	for (uint8_t col = 0; col < 5; col++) {
 		uint8_t bits = bitmap[col];
 		for (uint8_t row = 0; row < 7; row++) {
@@ -373,6 +416,63 @@ static const char *gnss_antenna_mode(void)
 #else
 	return "internal";
 #endif
+}
+
+static const struct battery_level_point battery_curve[] = {
+	{ 10000, 4200 },
+	{ 9500, 4100 },
+	{ 9000, 4050 },
+	{ 8000, 3950 },
+	{ 7000, 3900 },
+	{ 6000, 3850 },
+	{ 5000, 3800 },
+	{ 4000, 3750 },
+	{ 3000, 3700 },
+	{ 2000, 3600 },
+	{ 1000, 3500 },
+	{ 0, 3300 },
+};
+
+static int board_battery_mv_get(int *millivolts)
+{
+	int rc = battery_measure_enable(true);
+
+	if (rc < 0) {
+		return rc;
+	}
+
+	rc = battery_sample();
+	battery_measure_enable(false);
+
+	if (rc < 0) {
+		return rc;
+	}
+
+	*millivolts = rc;
+	return 0;
+}
+
+static int board_battery_percent_get(uint8_t *percent, int *millivolts)
+{
+	int batt_mv = 0;
+	int rc = board_battery_mv_get(&batt_mv);
+
+	if (rc < 0) {
+		return rc;
+	}
+
+	unsigned int pptt = battery_level_pptt((unsigned int)batt_mv, battery_curve);
+	unsigned int pct = (pptt + 50U) / 100U;
+
+	if (pct > 99U) {
+		pct = 99U;
+	}
+
+	*percent = (uint8_t)pct;
+	if (millivolts != NULL) {
+		*millivolts = batt_mv;
+	}
+	return 0;
 }
 
 #if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) || defined(CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST)
@@ -801,21 +901,21 @@ static void reset_target_value_cache(void)
 	}
 }
 
-static void clear_target_rows(const struct device *i2c_dev)
+static void clear_target_rows(const struct device *i2c_dev, uint8_t base_y)
 {
 	char blank_row[23];
 	memset(blank_row, ' ', sizeof(blank_row) - 1);
 	blank_row[sizeof(blank_row) - 1] = '\0';
 
 	for (int row = 0; row < MAX_DISPLAY_TARGETS; row++) {
-		uint8_t y = 32 + (row * 8);
+		uint8_t y = base_y + (row * 8);
 		write_line(i2c_dev, blank_row, 0, y, 0);
 	}
 }
 
-static void draw_target_rows_layout(const struct device *i2c_dev, int count)
+static void draw_target_rows_layout(const struct device *i2c_dev, int count, uint8_t base_y)
 {
-	uint8_t y = 32;
+	uint8_t y = base_y;
 	char message[16];
 
 	if (count < 0) {
@@ -825,7 +925,7 @@ static void draw_target_rows_layout(const struct device *i2c_dev, int count)
 		count = MAX_DISPLAY_TARGETS;
 	}
 
-	clear_target_rows(i2c_dev);
+	clear_target_rows(i2c_dev, base_y);
 
 	for (int i = 0; i < count; i++) {
 		if (y > (SSD1306_HEIGHT - 8)) {
@@ -861,18 +961,42 @@ int refresh_rate = 1000;
 int confirmation_rate = 20;
 
 int menu = -1;
-int tap_state = 0;
-int confirmation_state = 0;
+
+enum tap_direction {
+	TAP_NONE = 0,
+	TAP_UP,
+	TAP_DOWN,
+	TAP_LEFT,
+	TAP_RIGHT,
+};
+
+static struct k_mutex tap_mutex;
+static volatile enum tap_direction pending_tap = TAP_NONE;
+static volatile bool wake_request = false;
+
+/* Tune these values on hardware if needed. */
+static float tap_delta_threshold = 1.45f;
+static float tap_release_threshold = 0.50f;
+static float tap_axis_dominance = 1.30f;
+static float tap_direction_margin = 0.40f;
+static int tap_direction_window_ms = 20;
+static float tap_peak_weight = 0.60f;
+static int tap_deadtime_ms = 250;
+static int tap_boot_guard_ms = 7000;
+static int tap_menu_confirm_guard_ms = 450;
+
+/* Physical mounting orientation mapping. */
+static bool top_is_negative_y = true;
+static bool left_is_negative_x = true;
 
 const char *menu_str[] = {
     "EXIT MENU",
-	"GPS:",
-    "LTE:",
+	"GPS REACTIVATE",
 	"RELOAD COORDINATES",
 	"FW UPDATE",
 	"OFF"
 };
-int nb_menu = 6;
+int nb_menu = 5;
 
 K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
 K_THREAD_STACK_DEFINE(tap_stack, 1024);
@@ -889,19 +1013,79 @@ int measure_rate = 10;
 float valuex = 0;
 float valuey = 0;
 float valuez = 0;
+volatile float accel_x = 0.0f;
+volatile float accel_y = 0.0f;
+volatile float accel_z = 0.0f;
+volatile float linear_x = 0.0f;
+volatile float linear_y = 0.0f;
+volatile float linear_z = 0.0f;
 
-int tap_reset_rate = 10;
-int tap_threshold = 35;
-int tap_kickback_waittime = 100;
-int confirmation_timeout = 30;
-int multitap = 0;
-int bypass = 0;
+int tap_reset_rate = 20;
 uint32_t last_fix = 0;
 int gps_rate = 500;
 volatile int first = 0;
 uint32_t ref_lastfix = 0;
 uint32_t last_gnss_diag = 0;
 volatile bool gnss_display_dirty = true;
+static int64_t tap_accept_after_ms;
+static int64_t menu_confirm_after_ms;
+
+enum gps_capture_mode {
+	GPS_CAPTURE_DORMANT = 0,
+	GPS_CAPTURE_REACTIVATING,
+	GPS_CAPTURE_ACTIVE,
+};
+
+static volatile uint8_t gps_capture_mode = GPS_CAPTURE_REACTIVATING;
+static bool active_point_valid;
+static double active_point_lat;
+static double active_point_lon;
+static int64_t last_new_point_ms;
+static bool gps_seen_fix_since_reactivate;
+
+#define GPS_NEW_POINT_MIN_DISTANCE_M 8
+#define GPS_DORMANT_TIMEOUT_MS 120000
+
+enum startup_stage {
+	STARTUP_STAGE_GNSS_WARMUP = 0,
+	STARTUP_STAGE_LTE_CONNECT,
+	STARTUP_STAGE_DNS,
+	STARTUP_STAGE_TCP_CONNECT,
+	STARTUP_STAGE_HTTP_REQUEST,
+	STARTUP_STAGE_WAIT_SERVER,
+	STARTUP_STAGE_PARSE,
+	STARTUP_STAGE_READY,
+	STARTUP_STAGE_RETRY,
+	STARTUP_STAGE_ERROR,
+};
+
+static volatile uint8_t startup_stage = STARTUP_STAGE_GNSS_WARMUP;
+
+static const char *startup_stage_text(uint8_t stage)
+{
+	switch (stage) {
+	case STARTUP_STAGE_GNSS_WARMUP:
+		return "GNSS WARMUP";
+	case STARTUP_STAGE_LTE_CONNECT:
+		return "LTE CONNECT";
+	case STARTUP_STAGE_DNS:
+		return "DNS RESOLVE";
+	case STARTUP_STAGE_TCP_CONNECT:
+		return "TCP CONNECT";
+	case STARTUP_STAGE_HTTP_REQUEST:
+		return "HTTP REQUEST";
+	case STARTUP_STAGE_WAIT_SERVER:
+		return "WAIT SERVER";
+	case STARTUP_STAGE_PARSE:
+		return "PARSING DATA";
+	case STARTUP_STAGE_READY:
+		return "READY";
+	case STARTUP_STAGE_RETRY:
+		return "RETRY 60S";
+	default:
+		return "NET ERROR";
+	}
+}
 
 
 
@@ -1000,6 +1184,7 @@ int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
 
 void initial_connexion(){
 	LOG_INF("initial_connexion: begin fetching targets");
+	startup_stage = STARTUP_STAGE_DNS;
 
 	int err = 0;
 
@@ -1024,6 +1209,7 @@ void initial_connexion(){
     err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
     LOG_INF("getaddrinfo err: %d", err);
 	if (err != 0) {
+		startup_stage = STARTUP_STAGE_ERROR;
 		return;
 	}
 	
@@ -1034,6 +1220,7 @@ void initial_connexion(){
 
     LOG_INF("client_fd: %d", client_fd);
 	if (client_fd < 0) {
+		startup_stage = STARTUP_STAGE_ERROR;
 		freeaddrinfo(res);
 		return;
 	}
@@ -1041,11 +1228,14 @@ void initial_connexion(){
     LOG_INF("bind err: %d", err);
 
 
-    err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
+	startup_stage = STARTUP_STAGE_TCP_CONNECT;
+	err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr,sizeof(struct sockaddr_in));
     LOG_INF("connect err: %d", err);
 
 
 	if (err >= 0) {
+
+	startup_stage = STARTUP_STAGE_HTTP_REQUEST;
 
 
 	send_data_len = snprintf(send_buf, 2000,
@@ -1070,6 +1260,7 @@ void initial_connexion(){
 	memset(recv_buf, 0, sizeof(recv_buf));
 	int tot_num_bytes = 0;
 	int recv_offset = 0;
+	startup_stage = STARTUP_STAGE_WAIT_SERVER;
 	struct timeval recv_timeout = {
 		.tv_sec = 5,
 		.tv_usec = 0,
@@ -1103,6 +1294,7 @@ void initial_connexion(){
 		//LOG_INF("%s\n", recv_buf);
 	} while (num_bytes > 0);
 
+	startup_stage = STARTUP_STAGE_PARSE;
 
     double values[10];                       // Tableau pour stocker les doubles
     size_t count = 0;
@@ -1143,12 +1335,16 @@ void initial_connexion(){
 		targets[i] = values[i];
     }
 
+	startup_stage = STARTUP_STAGE_READY;
+
     LOG_INF("Finished. Closing socket");
     err = close(client_fd);
 	    LOG_INF("initial_connexion: socket closed");
 	    freeaddrinfo(res);
 	    LOG_INF("initial_connexion: done");
 
+	} else {
+		startup_stage = STARTUP_STAGE_ERROR;
 	}
 }
 
@@ -1273,10 +1469,77 @@ float sensor_value_to_float(const struct sensor_value *val)
 {
     return (float)val->val1 + (val->val2 / 1000000.0f);
 }
+
+static void push_tap_event(enum tap_direction dir)
+{
+	k_mutex_lock(&tap_mutex, K_FOREVER);
+	pending_tap = dir;
+	wake_request = true;
+	k_mutex_unlock(&tap_mutex);
+}
+
+static enum tap_direction pop_tap_event(void)
+{
+	enum tap_direction dir;
+
+	k_mutex_lock(&tap_mutex, K_FOREVER);
+	dir = pending_tap;
+	pending_tap = TAP_NONE;
+	k_mutex_unlock(&tap_mutex);
+
+	return dir;
+}
+
+static bool pop_wake_request(void)
+{
+	bool requested;
+
+	k_mutex_lock(&tap_mutex, K_FOREVER);
+	requested = wake_request;
+	wake_request = false;
+	k_mutex_unlock(&tap_mutex);
+
+	return requested;
+}
+
+static enum tap_direction detect_tap_direction(float x, float y)
+{
+	float adx = fabsf(x);
+	float ady = fabsf(y);
+
+	if (adx < tap_delta_threshold && ady < tap_delta_threshold) {
+		return TAP_NONE;
+	}
+
+	if (fabsf(adx - ady) < tap_direction_margin) {
+		return TAP_NONE;
+	}
+
+	if (ady >= adx * tap_axis_dominance) {
+		if (y < 0.0f) {
+			return top_is_negative_y ? TAP_UP : TAP_DOWN;
+		}
+		return top_is_negative_y ? TAP_DOWN : TAP_UP;
+	}
+
+	if (adx >= ady * tap_axis_dominance) {
+		if (x < 0.0f) {
+			return left_is_negative_x ? TAP_LEFT : TAP_RIGHT;
+		}
+		return left_is_negative_x ? TAP_RIGHT : TAP_LEFT;
+	}
+
+	return TAP_NONE;
+}
  
 void accelerometer_thread(void *a, void *b, void *c) {
 
 	const struct device *lis2dh = (const struct device *)a;
+	float grav_x = 0.0f;
+	float grav_y = 0.0f;
+	float grav_z = 0.0f;
+	bool filter_initialized = false;
+	const float grav_alpha = 0.92f;
 
     while (1) {
 
@@ -1295,6 +1558,21 @@ void accelerometer_thread(void *a, void *b, void *c) {
 		float ay = sensor_value_to_float(&accel[1]);
 		float az = sensor_value_to_float(&accel[2]);
 
+		if (!filter_initialized) {
+			grav_x = ax;
+			grav_y = ay;
+			grav_z = az;
+			filter_initialized = true;
+		} else {
+			grav_x = (grav_alpha * grav_x) + ((1.0f - grav_alpha) * ax);
+			grav_y = (grav_alpha * grav_y) + ((1.0f - grav_alpha) * ay);
+			grav_z = (grav_alpha * grav_z) + ((1.0f - grav_alpha) * az);
+		}
+
+		float lx = ax - grav_x;
+		float ly = ay - grav_y;
+		float lz = az - grav_z;
+
 
 		avg += sqrtf(ax*ax+ay*ay+az*az)-9.8;
 
@@ -1302,6 +1580,12 @@ void accelerometer_thread(void *a, void *b, void *c) {
 		valuex = ax*ax;
 		valuey = ay*ay;
 		valuez = az*az;
+		accel_x = ax;
+		accel_y = ay;
+		accel_z = az;
+		linear_x = lx;
+		linear_y = ly;
+		linear_z = lz;
 
 
 		k_sleep(K_MSEC(measure_rate));
@@ -1310,29 +1594,71 @@ void accelerometer_thread(void *a, void *b, void *c) {
 }
 
 void tap_thread(void *a, void *b, void *c) {
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
 
-	int reset_state = 0;
+	bool in_impulse = false;
+	int64_t impulse_start_ms = 0;
+	float onset_sum_x = 0.0f;
+	float onset_sum_y = 0.0f;
+	int onset_samples = 0;
+	float peak_x = 0.0f;
+	float peak_y = 0.0f;
+	float peak_plane = 0.0f;
+	int64_t next_allowed = 0;
 
-	while(1){
+	while (1) {
+		float tap_x = linear_x;
+		float tap_y = linear_y;
+		float plane = sqrtf((tap_x * tap_x) + (tap_y * tap_y));
 
-		if(reset_state >= reset_threshold){
+		int64_t now_ms = k_uptime_get();
+		if (!in_impulse) {
+			if (now_ms >= next_allowed && plane >= tap_delta_threshold) {
+				in_impulse = true;
+				impulse_start_ms = now_ms;
+				onset_sum_x = tap_x;
+				onset_sum_y = tap_y;
+				onset_samples = 1;
+				peak_x = tap_x;
+				peak_y = tap_y;
+				peak_plane = plane;
+			}
+		} else {
+			if (plane > peak_plane) {
+				peak_plane = plane;
+				peak_x = tap_x;
+				peak_y = tap_y;
+			}
 
-			reset_state = 0;
-			avg = 0;
-			tap_state = 0;
-			
-		}
+			if ((now_ms - impulse_start_ms) <= tap_direction_window_ms) {
+				onset_sum_x += tap_x;
+				onset_sum_y += tap_y;
+				onset_samples++;
+			}
 
-		if(fabs(avg) > tap_threshold){
-			LOG_INF("TAPPED %.2f",valuex);
+			if (plane <= tap_release_threshold) {
+				float onset_x = onset_samples > 0 ? (onset_sum_x / onset_samples) : peak_x;
+				float onset_y = onset_samples > 0 ? (onset_sum_y / onset_samples) : peak_y;
+				float dir_x = (tap_peak_weight * peak_x) + ((1.0f - tap_peak_weight) * onset_x);
+				float dir_y = (tap_peak_weight * peak_y) + ((1.0f - tap_peak_weight) * onset_y);
+				enum tap_direction dir = detect_tap_direction(dir_x, dir_y);
 
-			tap_state = 1;
-			reset_state = reset_threshold;
-			k_sleep(K_MSEC(tap_kickback_waittime));
+			if (dir != TAP_NONE) {
+				push_tap_event(dir);
+				next_allowed = now_ms + tap_deadtime_ms;
+				LOG_INF("Tap dir=%d peak=(%.2f,%.2f) onset=(%.2f,%.2f) amp=%.2f", dir,
+					(double)peak_x, (double)peak_y,
+					(double)onset_x, (double)onset_y,
+					(double)peak_plane);
+			}
+
+			in_impulse = false;
+			}
 		}
 
 		k_sleep(K_MSEC(tap_reset_rate));
-		reset_state += 1;
 	}
 }
 
@@ -1344,25 +1670,80 @@ k_mutex_lock(&state.mutex, K_FOREVER);
 while(!state.ready) {
 	k_condvar_wait(&state.cond, &state.mutex,K_FOREVER);
 }
+	state.ready = false;
 k_mutex_unlock(&state.mutex);
 
 
 	LOG_INF("GPS");
-			print_satellite_stats(&last_pvt);
+			int64_t now_ms = k_uptime_get();
+
+			if (gps_capture_mode == GPS_CAPTURE_DORMANT) {
+				if (gps_tracking != 0 || gps_using != 0 || gps_unk != 0) {
+					gps_tracking = 0;
+					gps_using = 0;
+					gps_unk = 0;
+					gnss_display_dirty = true;
+				}
+			} else {
+				print_satellite_stats(&last_pvt);
+			}
 
 			if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+							int heading_tmp = 0;
+							int distance_m = 0;
+
 							gnss_has_fix = true;
-							fix_timestamp = k_uptime_get();
-							print_fix_data(&last_pvt);
+							if (gps_capture_mode != GPS_CAPTURE_DORMANT) {
+								fix_timestamp = now_ms;
+								print_fix_data(&last_pvt);
 								last_fix = 0;
+								gps_seen_fix_since_reactivate = true;
 								gnss_display_dirty = true;
+							} else if (last_new_point_ms > 0) {
+								last_fix = (uint32_t)((now_ms - last_new_point_ms) / 1000);
+							}
+
+							if (gps_capture_mode == GPS_CAPTURE_REACTIVATING) {
+								active_point_lat = last_latitude;
+								active_point_lon = last_longitude;
+								active_point_valid = true;
+								last_new_point_ms = now_ms;
+								gps_capture_mode = GPS_CAPTURE_ACTIVE;
+								LOG_INF("GPS capture reactivated: first point acquired");
+							} else if (gps_capture_mode == GPS_CAPTURE_ACTIVE) {
+								if (!active_point_valid) {
+									active_point_lat = last_latitude;
+									active_point_lon = last_longitude;
+									active_point_valid = true;
+									last_new_point_ms = now_ms;
+								} else {
+									calcul_cap_distance_int(active_point_lat, active_point_lon,
+										last_latitude, last_longitude,
+										&heading_tmp, &distance_m);
+									if (distance_m >= GPS_NEW_POINT_MIN_DISTANCE_M) {
+										active_point_lat = last_latitude;
+										active_point_lon = last_longitude;
+										last_new_point_ms = now_ms;
+									}
+								}
+
+							}
 							//print_distance_from_reference(&last_pvt);
 
 
 						} else {
+							gnss_has_fix = false;
 
 							last_fix = (uint32_t)((k_uptime_get() - fix_timestamp) / 1000);
 							gnss_display_dirty = true;
+
+							if (gps_capture_mode == GPS_CAPTURE_ACTIVE &&
+							    gps_seen_fix_since_reactivate &&
+							    ((int64_t)last_fix * 1000) >= GPS_DORMANT_TIMEOUT_MS) {
+								gps_capture_mode = GPS_CAPTURE_DORMANT;
+								gnss_display_dirty = true;
+								LOG_INF("GPS capture dormant: signal lost for 2 minutes after at least one fix");
+							}
 
 							if ((k_uptime_get_32() - last_gnss_diag) >= 5000U) {
 								LOG_WRN("GNSS searching: tracked=%u used=%u unhealthy=%u last_fix=%us antenna=%s",
@@ -1375,8 +1756,6 @@ k_mutex_unlock(&state.mutex);
 							}
 
 						}
-
-	k_sleep(K_MSEC(gps_rate));
 
 }
 
@@ -1441,9 +1820,7 @@ void reload_coordinates(const struct device *i2c_dev){
 
 	initial_connexion();
 
-	menu = -2;
-	bypass = 1;
-	multitap = 1;
+	menu = -1;
 	first = 0;
 
 }
@@ -1455,10 +1832,17 @@ void coordinates_thread(void *a, void *b, void *c)
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
 
-	k_sleep(K_SECONDS(2));
+	/* Give GNSS priority at boot to avoid starving early satellite acquisition. */
+	startup_stage = STARTUP_STAGE_GNSS_WARMUP;
+	int64_t warmup_deadline = k_uptime_get() + 30000;
+	while (!gnss_has_fix && k_uptime_get() < warmup_deadline) {
+		k_sleep(K_SECONDS(1));
+	}
+	LOG_INF("coordinates_thread: GNSS warmup complete (fix=%d), starting LTE fetch", gnss_has_fix ? 1 : 0);
 
 	while (1) {
 		k_mutex_lock(&lte_mutex, K_FOREVER);
+		startup_stage = STARTUP_STAGE_LTE_CONNECT;
 		lte_connect();
 		LOG_INF("coordinates_thread: starting coordinates fetch");
 		initial_connexion();
@@ -1467,10 +1851,12 @@ void coordinates_thread(void *a, void *b, void *c)
 
 		if (targets_count > 0) {
 			LOG_INF("coordinates_thread: loaded %d targets", targets_count);
+			startup_stage = STARTUP_STAGE_READY;
 			break;
 		}
 
 		LOG_WRN("coordinates_thread: no targets yet, retrying in 60s");
+		startup_stage = STARTUP_STAGE_RETRY;
 		k_sleep(K_SECONDS(60));
 	}
 }
@@ -1508,8 +1894,7 @@ if(lte_state == 0){return; }
 
 
 	menu = -1;
-	bypass = 1;
-	multitap = 1;
+	first = 0;
 
 }
 
@@ -1526,6 +1911,11 @@ void ssd1306_power_on(const struct device *i2c_dev) {
 }
 
 void off(const struct device *i2c_dev){
+	ARG_UNUSED(i2c_dev);
+	LOG_WRN("OFF action temporarily disabled for display diagnostics");
+	menu = -1;
+	first = 0;
+	return;
 
 	k_mutex_lock(&state.mutex, K_FOREVER);
 	state.ready = false;
@@ -1533,7 +1923,7 @@ void off(const struct device *i2c_dev){
 
 	ssd1306_power_off(i2c_dev);
 
-	while(tap_state == 0){
+	while (!pop_wake_request()) {
 
 
 		k_sleep(K_SECONDS(5));
@@ -1565,18 +1955,120 @@ void write_line(const struct device *i2c_dev, const char *line, uint8_t x, uint8
 	}
 }
 
+static void draw_menu_screen(const struct device *i2c_dev)
+{
+	uint8_t y = 0;
+	char message[128];
+
+	clear_display(i2c_dev);
+
+	for (int i = 0; i < nb_menu; i++) {
+		snprintf(message, sizeof(message), "%s", menu_str[i]);
+		write_line(i2c_dev, message, 6, y, 0);
+
+		y += 8;
+	}
+
+	write_line(i2c_dev, ">", 0, menu * 8, 0);
+}
+
+static void open_menu(const struct device *i2c_dev)
+{
+	menu = 0;
+	menu_confirm_after_ms = k_uptime_get() + tap_menu_confirm_guard_ms;
+	draw_menu_screen(i2c_dev);
+}
+
+static void move_menu_cursor(const struct device *i2c_dev, int delta)
+{
+	char marker[2] = " ";
+
+	write_line(i2c_dev, marker, 0, menu * 8, 1);
+	menu = (menu + delta + nb_menu) % nb_menu;
+	menu_confirm_after_ms = k_uptime_get() + tap_menu_confirm_guard_ms;
+	marker[0] = '>';
+	write_line(i2c_dev, marker, 0, menu * 8, 0);
+}
+
+static void execute_menu_selection(const struct device *i2c_dev)
+{
+	LOG_INF("MENU CHOISI: %s", menu_str[menu]);
+
+	switch (menu) {
+	case 0:
+		exit_menu(i2c_dev);
+		first = 0;
+		last_tracked = 0;
+		last_fix = 0;
+		last_in_fix = 0;
+		last_unhealthy = 0;
+		last_latitude = 0;
+		last_longitude = 0;
+		break;
+	case 1:
+		gps_capture_mode = GPS_CAPTURE_ACTIVE;
+		last_new_point_ms = k_uptime_get();
+		gps_seen_fix_since_reactivate = false;
+		if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+			print_fix_data(&last_pvt);
+			active_point_lat = last_latitude;
+			active_point_lon = last_longitude;
+			active_point_valid = true;
+			gps_seen_fix_since_reactivate = true;
+			LOG_INF("GPS capture mode set to ACTIVE (instant fix)");
+		} else {
+			active_point_valid = false;
+			LOG_INF("GPS capture mode set to ACTIVE (waiting for first fix)");
+		}
+		/* Always refresh signal counters immediately when exiting dormant. */
+		print_satellite_stats(&last_pvt);
+		last_tracked = 0xFF;
+		last_in_fix = 0xFF;
+		last_unhealthy = 0xFF;
+		gnss_display_dirty = true;
+		menu = -1;
+		first = 0;
+		break;
+	case 2:
+		reload_coordinates(i2c_dev);
+		first = 0;
+		break;
+	case 3:
+		LOG_WRN("Firmware update disabled during diagnostics");
+		break;
+	case 4:
+		off(i2c_dev);
+		break;
+	default:
+		break;
+	}
+
+	if (menu >= 0) {
+		draw_menu_screen(i2c_dev);
+	}
+}
+
 int main(void)
 {
 
 	k_mutex_init(&display_mutex);
 	k_mutex_init(&lte_mutex);
+	k_mutex_init(&tap_mutex);
 	k_mutex_init(&state.mutex);
 	k_condvar_init(&state.cond);
-	state.ready = true;
+	state.ready = false;
 	uint8_t x = 0, y = 0;
 	char message[128];
 	int err;
 	bool home_screen_cleared = false;
+	uint8_t battery_pct = 0;
+	uint8_t displayed_battery_pct = 0xFF;
+	uint8_t displayed_startup_stage = 0xFF;
+	uint8_t displayed_startup_visible = 0xFF;
+	bool battery_valid = false;
+	int64_t next_battery_poll_ms = 0;
+	tap_accept_after_ms = k_uptime_get() + tap_boot_guard_ms;
+	menu_confirm_after_ms = 0;
 
 	//const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 	if (!device_is_ready(i2c_dev)) {
@@ -1594,13 +2086,14 @@ int main(void)
 
 	snprintf(message, sizeof(message), "%s %s", __DATE__, __TIME__);
 	write_line(i2c_dev, message, 0, 0, 1);
-	k_sleep(K_SECONDS(5));
+	k_sleep(K_MSEC(600));
 
 	clear_display(i2c_dev);
 	snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
 	write_line(i2c_dev, message, 0, 0, 0);
 	snprintf(message, sizeof(message), "LAST FIX: %d", 0);
 	write_line(i2c_dev, message, 0, 8, 0);
+	write_line(i2c_dev, "--%", 18 * 6, 8, 0);
 	snprintf(message, sizeof(message), "                ");
 	write_line(i2c_dev, message, 0, 32, 0);
 	home_screen_cleared = true;
@@ -1651,10 +2144,6 @@ int main(void)
 		}
 	}
 
-	LOG_INF("main: starting coordinates thread");
-	k_thread_create(&coordinates_data, coordinates_stack, K_THREAD_STACK_SIZEOF(coordinates_stack),
-			coordinates_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
-
 	if (gnss_init_and_start() != 0) {
 		LOG_ERR("Failed to initialize and start GNSS");
 		while (true) {
@@ -1662,19 +2151,51 @@ int main(void)
 		}
 	}
 
-	LOG_INF("main: starting initial coordinates fetch");
-	fix_timestamp = k_uptime_get();
+	/* Explicit runtime init: always begin with a fresh GPS reactivation cycle at boot. */
+	gps_capture_mode = GPS_CAPTURE_REACTIVATING;
+	active_point_valid = false;
+	last_new_point_ms = 0;
+	gps_seen_fix_since_reactivate = false;
+	gnss_display_dirty = true;
+	last_tracked = 0xFF;
+	last_in_fix = 0xFF;
+	last_unhealthy = 0xFF;
 
-	multitap = 0;
-	int confirmation = 0;
+	LOG_INF("main: GNSS started, scheduling coordinates thread");
+	k_thread_create(&coordinates_data, coordinates_stack, K_THREAD_STACK_SIZEOF(coordinates_stack),
+			coordinates_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
+
+	LOG_INF("main: starting initial GNSS phase");
+	LOG_INF("GPS capture mode at boot: REACTIVATING");
+	fix_timestamp = k_uptime_get();
 
 	while(true){
 
+		int64_t now_ms = k_uptime_get();
+		if (now_ms >= next_battery_poll_ms) {
+			int battery_mv = 0;
+
+			next_battery_poll_ms = now_ms + 30000;
+			if (board_battery_percent_get(&battery_pct, &battery_mv) == 0) {
+				battery_valid = true;
+				LOG_DBG("Battery(board ADC): %d mV => %u%%", battery_mv, battery_pct);
+			} else {
+				battery_valid = false;
+			}
+		}
+
 	if(menu == -1){
 		int visible_targets = targets_count;
+		int layout_rows;
+		bool show_startup_stage = (startup_stage != STARTUP_STAGE_READY) || (targets_count <= 0);
+		uint8_t targets_base_y = show_startup_stage ? 32 : 24;
 		if (visible_targets > MAX_DISPLAY_TARGETS) {
 			visible_targets = MAX_DISPLAY_TARGETS;
 		}
+		if (visible_targets < 0) {
+			visible_targets = 0;
+		}
+		layout_rows = show_startup_stage ? 0 : visible_targets;
 
 		if (!home_screen_cleared) {
 			clear_display(i2c_dev);
@@ -1689,13 +2210,32 @@ int main(void)
 
 			snprintf(message, sizeof(message), "LAST FIX: %d",0);
 			write_line(i2c_dev, message, 0, 8, 0);
-			draw_target_rows_layout(i2c_dev, visible_targets);
+			write_line(i2c_dev, "--%", 18 * 6, 8, 0);
+			write_line(i2c_dev, "                     ", 0, 24, 0);
+			displayed_battery_pct = 0xFF;
+			draw_target_rows_layout(i2c_dev, layout_rows, targets_base_y);
 
 
 		}
 
-		if (displayed_targets_count != visible_targets) {
-			draw_target_rows_layout(i2c_dev, visible_targets);
+		if (displayed_targets_count != layout_rows ||
+		    displayed_startup_visible != (show_startup_stage ? 1 : 0)) {
+			draw_target_rows_layout(i2c_dev, layout_rows, targets_base_y);
+			gnss_display_dirty = true;
+		}
+
+		if (show_startup_stage) {
+			if (displayed_startup_stage != startup_stage || displayed_startup_visible != 1) {
+				snprintf(message, sizeof(message), "%s", startup_stage_text(startup_stage));
+				write_line(i2c_dev, "                     ", 0, 24, 1);
+				write_line(i2c_dev, message, 0, 24, 1);
+				displayed_startup_stage = startup_stage;
+				displayed_startup_visible = 1;
+			}
+		} else if (displayed_startup_visible != 0) {
+			/* Do not blank y=24 here: this row is reused by target line #1 in READY state. */
+			displayed_startup_visible = 0;
+			displayed_startup_stage = startup_stage;
 			gnss_display_dirty = true;
 		}
 
@@ -1709,10 +2249,35 @@ int main(void)
 
 		}
 
+		if (!battery_valid) {
+			if (displayed_battery_pct != 0xFE) {
+				write_line(i2c_dev, "--%", 18 * 6, 8, 1);
+				displayed_battery_pct = 0xFE;
+			}
+		} else if (displayed_battery_pct != battery_pct) {
+			snprintf(message, sizeof(message), "%2u%%", battery_pct);
+			write_line(i2c_dev, message, 18 * 6, 8, 1);
+			displayed_battery_pct = battery_pct;
+		}
+
 		if(gps_state == 1 || first == 0){
 
 			first = 1;
 			y = 0;
+
+			if (gps_capture_mode == GPS_CAPTURE_DORMANT) {
+				x = 3 * 6;
+				write_line(i2c_dev, "--", x, y, 1);
+				x = 9 * 6;
+				write_line(i2c_dev, "--", x, y, 1);
+				x = 16 * 6;
+				write_line(i2c_dev, "--", x, y, 1);
+
+				/* Force refresh of numeric counters when leaving dormant mode. */
+				last_tracked = 0xFF;
+				last_in_fix = 0xFF;
+				last_unhealthy = 0xFF;
+			} else {
 
 			if(last_tracked != gps_tracking){
 
@@ -1747,8 +2312,9 @@ int main(void)
 			last_unhealthy = gps_unk;
 
 			}
+			}
 
-			if(lte_state == 1 && gps_using >= 4){
+			if(lte_state == 1 && gps_using >= 4 && gps_capture_mode == GPS_CAPTURE_ACTIVE){
 
 			if(position >= 5*20){
 
@@ -1764,8 +2330,8 @@ int main(void)
 
 			if((position+20) % 20 == 0){
 				ts[position/20] = timestamp;
-				lat[position/20] = last_latitude;
-				lng[position/20] = last_longitude;
+				lat[position/20] = active_point_valid ? (float)active_point_lat : (float)last_latitude;
+				lng[position/20] = active_point_valid ? (float)active_point_lon : (float)last_longitude;
 			}
 
 			position++;
@@ -1774,14 +2340,18 @@ int main(void)
 
 			}
 
-		if(gnss_display_dirty || fabs(ref_latitude2 - last_latitude) > 0.00001 || fabs(ref_longitude2 - last_longitude) > 0.00001){
+		double calc_latitude = active_point_valid ? active_point_lat : last_latitude;
+		double calc_longitude = active_point_valid ? active_point_lon : last_longitude;
 
-ref_latitude2 = last_latitude;
-ref_longitude2 = last_longitude;
+		if(!show_startup_stage &&
+		   (gnss_display_dirty || fabs(ref_latitude2 - calc_latitude) > 0.00001 || fabs(ref_longitude2 - calc_longitude) > 0.00001)){
+
+			ref_latitude2 = calc_latitude;
+			ref_longitude2 = calc_longitude;
 			gnss_display_dirty = false;
 
 x = 0;
-y = 32;
+y = targets_base_y;
 
 for(int i=0;i<visible_targets;i++){
 
@@ -1791,7 +2361,7 @@ for(int i=0;i<visible_targets;i++){
 
 	int heading, distance;
 
-	calcul_cap_distance_int(last_latitude, last_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
+	calcul_cap_distance_int(calc_latitude, calc_longitude, targets[i*2], targets[i*2+1], &heading, &distance);
 
 	if(distance > 10000){
 		distance = 9999;
@@ -1822,129 +2392,46 @@ for(int i=0;i<visible_targets;i++){
 
 		}
 
-	if(tap_state == 1 || bypass == 1){
+		enum tap_direction tap = pop_tap_event();
+		if (tap != TAP_NONE) {
+			if (k_uptime_get() < tap_accept_after_ms) {
+				k_sleep(K_MSEC(100));
+				continue;
+			}
 
-			bypass = 0;
-			multitap += 1;
-
-
-			if(menu == -1 || menu == -2){
-
-				multitap = 0;
-				LOG_INF("GOING IN THE MENU");
-				menu = 0;
-
-				clear_display(i2c_dev);
-				y=0;
-
-				for(int i=0;i<nb_menu;i++){
-
-					LOG_INF("%s",menu_str[i]);
-					x = 6;
-					snprintf(message, sizeof(message), "%s",menu_str[i]);
-					write_line(i2c_dev, message, x, y, 0);
-
-					if(i == 1){
-
-						if(gps_state == 0){
-							snprintf(message, sizeof(message), " OFF");
-						}else{
-							snprintf(message, sizeof(message), " ON ");
-						}
-
-						write_line(i2c_dev,message, 5*6,y,0);
-
-					}
-					if(i == 2){
-
-						if(lte_state == 0){
-							snprintf(message, sizeof(message), " OFF");
-						}else{
-							snprintf(message, sizeof(message), " ON ");
-						}
-
-						write_line(i2c_dev,message, 5*6,y,0);
-					}
-
-				y += 8;
-
-
+			if (menu == -1) {
+				if (tap == TAP_LEFT || tap == TAP_RIGHT) {
+					LOG_INF("GOING IN THE MENU");
+					open_menu(i2c_dev);
 				}
-
-
-				//Remettre le nouveau caractère
-				x = 0;
-				y = 0;
-				snprintf(message, sizeof(message), ">");
-				write_line(i2c_dev, message, x, y, 0);
-				confirmation = 0;
-
+			} else {
+				switch (tap) {
+				case TAP_UP:
+					/* Haut physique: descendre le curseur dans la liste. */
+					move_menu_cursor(i2c_dev, +1);
+					break;
+				case TAP_DOWN:
+					/* Bas physique: remonter le curseur. */
+					move_menu_cursor(i2c_dev, -1);
+					break;
+				case TAP_LEFT:
+					/* Gauche physique: confirmer/entrer. */
+					if (k_uptime_get() >= menu_confirm_after_ms) {
+						execute_menu_selection(i2c_dev);
+					}
+					break;
+				case TAP_RIGHT:
+					/* Droite physique: retour page de base. */
+					exit_menu(i2c_dev);
+					first = 0;
+					break;
+				default:
+					break;
+				}
 			}
-			
-			if(menu != -1 && multitap == 1){
-
-				multitap = 0;
-				confirmation = 0;
-				
-				//effacer le caractère
-				snprintf(message, sizeof(message), " ");
-				write_line(i2c_dev, message, 0, menu*8, 1);
-
-				//Changer la position
-				menu = (menu + 1 + nb_menu) % nb_menu;
-
-				//Remettre le nouveau caractère
-				snprintf(message, sizeof(message), ">");
-				write_line(i2c_dev, message, 0, menu*8, 0);
-
-			}
-
 		}
 
-	if(menu != -1 && confirmation >= confirmation_timeout){
-
-				multitap = 0;
-				confirmation = 0;
-
-				LOG_ERR("MENU CHOISI: %s",menu_str[menu]);
-
-
-				switch(menu){
-
-					case 0: 
-							exit_menu(i2c_dev);
-							first = 0;
-							last_tracked = 0;
-							last_fix = 0;
-							last_in_fix = 0;
-							last_unhealthy = 0;
-							last_latitude = 0;
-							last_longitude = 0;
-							break;
-					case 1: 
-							change_gps(i2c_dev);
-							first = 0;
-							break;
-					case 2:
-							change_lte(i2c_dev);
-							first = 0;
-							break;
-					case 3:
-							reload_coordinates(i2c_dev);
-							first = 0;
-							break;
-					case 4:
-							LOG_WRN("Firmware update disabled during diagnostics");
-							break;
-					case 5:
-							off(i2c_dev);
-							break;
-				}
-
-			}
-
 		k_sleep(K_MSEC(100));	
-		confirmation += 1;	
 
 	}
 
