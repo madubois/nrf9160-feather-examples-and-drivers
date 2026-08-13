@@ -44,6 +44,7 @@
 #include <time.h>
 
 #include "battery.h"
+#include "spectre_logo.h"
 
 
 
@@ -128,6 +129,8 @@ static int ssd1306_write_data_block(const struct device *i2c_dev, const uint8_t 
 static uint8_t framebuffer[SSD1306_WIDTH][SSD1306_PAGES] = {0};
 static struct k_mutex display_mutex;
 
+void clear_display(const struct device *i2c_dev);
+
 
 
 void allumer_pixel(const struct device *i2c_dev, uint8_t x, uint8_t y) {
@@ -196,6 +199,42 @@ static void ssd1306_init(const struct device *i2c_dev) {
     ssd1306_write_cmd(i2c_dev, 0xA4); // Entire display ON (resume)
     ssd1306_write_cmd(i2c_dev, 0xA6); // Set normal display (not inverted)
     ssd1306_write_cmd(i2c_dev, 0xAF); // Display ON
+	k_mutex_unlock(&display_mutex);
+}
+
+static void draw_startup_logo(const struct device *i2c_dev)
+{
+	uint8_t page_buf[SSD1306_WIDTH];
+	uint8_t src_x;
+	uint8_t src_page;
+
+	memset(framebuffer, 0, sizeof(framebuffer));
+	clear_display(i2c_dev);
+	for (src_page = 0; src_page < SSD1306_PAGES; src_page++) {
+		for (src_x = 0; src_x < SSD1306_WIDTH; src_x++) {
+			uint8_t column = spectre_logo_128x64[(src_page * SSD1306_WIDTH) + src_x];
+			framebuffer[src_x][src_page] = column;
+		}
+	}
+
+	k_mutex_lock(&display_mutex, K_FOREVER);
+	for (uint8_t page = 0; page < SSD1306_PAGES; page++) {
+		memset(page_buf, 0, sizeof(page_buf));
+		for (uint8_t x = 0; x < SSD1306_WIDTH; x++) {
+			page_buf[x] = framebuffer[x][page];
+		}
+		ssd1306_write_cmd(i2c_dev, 0x21);
+		ssd1306_write_cmd(i2c_dev, 0);
+		ssd1306_write_cmd(i2c_dev, SSD1306_WIDTH - 1);
+		ssd1306_write_cmd(i2c_dev, 0x22);
+		ssd1306_write_cmd(i2c_dev, page);
+		ssd1306_write_cmd(i2c_dev, page);
+		for (uint8_t x = 0; x < SSD1306_WIDTH; x += 6) {
+			size_t len = (SSD1306_WIDTH - x >= 6) ? 6 : (SSD1306_WIDTH - x);
+			ssd1306_write_data_block(i2c_dev, &page_buf[x], len);
+		}
+	}
+
 	k_mutex_unlock(&display_mutex);
 }
 
@@ -973,6 +1012,30 @@ enum tap_direction {
 static struct k_mutex tap_mutex;
 static volatile enum tap_direction pending_tap = TAP_NONE;
 static volatile bool wake_request = false;
+static struct k_sem wake_sem;
+static struct k_mutex motion_mutex;
+static struct k_condvar motion_cond;
+static bool motion_active = true;
+static const struct device *accel_sensor;
+static int64_t off_wake_armed_after_ms;
+static volatile bool off_mode_active;
+static volatile int64_t off_wake_first_motion_ms;
+static volatile int64_t off_wake_last_motion_ms;
+static volatile int off_wake_poll_streak;
+static volatile bool off_wake_probe_active;
+static const float off_wake_start_threshold_ms2 = 1.20f;
+static const float off_wake_hold_threshold_ms2 = 0.60f;
+static const int off_wake_hold_ms = 700;
+static const int off_wake_event_gap_ms = 180;
+static const int off_wake_idle_wait_ms = 250;
+static const int off_wake_fast_wait_ms = 30;
+static const int off_wake_odr_hz = 12;
+static const int active_odr_hz = 100;
+static const int logo_preview_ms = 5000;
+static const struct sensor_trigger wake_trigger = {
+	.type = SENSOR_TRIG_DELTA,
+	.chan = SENSOR_CHAN_ACCEL_XYZ,
+};
 
 /* Tune these values on hardware if needed. */
 static float tap_delta_threshold = 1.45f;
@@ -988,6 +1051,88 @@ static int tap_menu_confirm_guard_ms = 450;
 /* Physical mounting orientation mapping. */
 static bool top_is_negative_y = true;
 static bool left_is_negative_x = true;
+
+extern volatile float linear_x;
+extern volatile float linear_y;
+extern volatile float linear_z;
+
+float sensor_value_to_float(const struct sensor_value *val);
+
+static void off_wake_reset_motion(void);
+
+static bool off_wake_register_motion(int64_t now_ms)
+{
+	int64_t previous_motion_ms;
+
+	if (!off_mode_active || (now_ms < off_wake_armed_after_ms)) {
+		return false;
+	}
+
+	previous_motion_ms = off_wake_last_motion_ms;
+	if (off_wake_first_motion_ms == 0 ||
+	    (now_ms - previous_motion_ms) > off_wake_event_gap_ms) {
+		off_wake_first_motion_ms = now_ms;
+		off_wake_last_motion_ms = now_ms;
+		return false;
+	}
+
+	off_wake_last_motion_ms = now_ms;
+
+	return (now_ms - off_wake_first_motion_ms) >= off_wake_hold_ms;
+}
+
+static void off_wake_reset_motion(void)
+{
+	off_wake_first_motion_ms = 0;
+	off_wake_last_motion_ms = 0;
+	off_wake_poll_streak = 0;
+	off_wake_probe_active = false;
+}
+
+static bool off_wake_poll_motion(int64_t now_ms)
+{
+	float linear_mag;
+	float lx = linear_x;
+	float ly = linear_y;
+	float lz = linear_z;
+
+	linear_mag = sqrtf((lx * lx) + (ly * ly) + (lz * lz));
+
+	if (linear_mag < off_wake_start_threshold_ms2) {
+		off_wake_reset_motion();
+		return false;
+	}
+
+	if (!off_wake_probe_active) {
+		off_wake_probe_active = true;
+	}
+
+	if (linear_mag < off_wake_hold_threshold_ms2) {
+		off_wake_reset_motion();
+		off_wake_probe_active = true;
+		return false;
+	}
+
+	if (++off_wake_poll_streak < 4) {
+		return false;
+	}
+
+	return off_wake_register_motion(now_ms);
+}
+
+static void wake_trigger_handler(const struct device *dev, const struct sensor_trigger *trig)
+{
+	int64_t now_ms;
+
+	ARG_UNUSED(dev);
+	ARG_UNUSED(trig);
+
+	now_ms = k_uptime_get();
+	if (off_wake_register_motion(now_ms)) {
+		wake_request = true;
+		k_sem_give(&wake_sem);
+	}
+}
 
 const char *menu_str[] = {
     "EXIT MENU",
@@ -1093,24 +1238,24 @@ static const char *startup_stage_text(uint8_t stage)
 
 void clear_display(const struct device *i2c_dev) {
 	k_mutex_lock(&display_mutex, K_FOREVER);
-    // 1. Efface le framebuffer RAM
-    memset(framebuffer, 0, sizeof(framebuffer));
+	// 1. Efface le framebuffer RAM
+	memset(framebuffer, 0, sizeof(framebuffer));
 
-    // 2. Pour chaque page, envoie 128 zéros d'un coup
+	// 2. Pour chaque page, envoie 128 zéros d'un coup
 	for (uint8_t page = 0; page < SSD1306_PAGES; page++) {
-        ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
-        ssd1306_write_cmd(i2c_dev, 0);    // Start column
+		ssd1306_write_cmd(i2c_dev, 0x21); // Set column address
+		ssd1306_write_cmd(i2c_dev, 0);    // Start column
 		ssd1306_write_cmd(i2c_dev, SSD1306_WIDTH - 1);  // End column
-        ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
-        ssd1306_write_cmd(i2c_dev, page); // Start page
-        ssd1306_write_cmd(i2c_dev, page); // End page
+		ssd1306_write_cmd(i2c_dev, 0x22); // Set page address
+		ssd1306_write_cmd(i2c_dev, page); // Start page
+		ssd1306_write_cmd(i2c_dev, page); // End page
 
-        // Envoie 128 octets d'un coup (plus rapide que 128 appels séparés)
-        uint8_t buf[129];
-        buf[0] = 0x40; // Control byte for data
+		// Envoie 128 octets d'un coup (plus rapide que 128 appels séparés)
+		uint8_t buf[129];
+		buf[0] = 0x40; // Control byte for data
 		memset(&buf[1], 0, SSD1306_WIDTH);
-        i2c_write(i2c_dev, buf, sizeof(buf), SSD1306_I2C_ADDR);
-    }
+		i2c_write(i2c_dev, buf, sizeof(buf), SSD1306_I2C_ADDR);
+	}
 	k_mutex_unlock(&display_mutex);
 }
 
@@ -1472,6 +1617,10 @@ float sensor_value_to_float(const struct sensor_value *val)
 
 static void push_tap_event(enum tap_direction dir)
 {
+	if (off_mode_active) {
+		return;
+	}
+
 	k_mutex_lock(&tap_mutex, K_FOREVER);
 	pending_tap = dir;
 	wake_request = true;
@@ -1500,6 +1649,15 @@ static bool pop_wake_request(void)
 	k_mutex_unlock(&tap_mutex);
 
 	return requested;
+}
+
+static void wait_for_motion_active(void)
+{
+	k_mutex_lock(&motion_mutex, K_FOREVER);
+	while (!motion_active) {
+		k_condvar_wait(&motion_cond, &motion_mutex, K_FOREVER);
+	}
+	k_mutex_unlock(&motion_mutex);
 }
 
 static enum tap_direction detect_tap_direction(float x, float y)
@@ -1542,6 +1700,7 @@ void accelerometer_thread(void *a, void *b, void *c) {
 	const float grav_alpha = 0.92f;
 
     while (1) {
+		wait_for_motion_active();
 
 		struct sensor_value accel[3];
 		if (sensor_sample_fetch(lis2dh) < 0) {
@@ -1589,6 +1748,7 @@ void accelerometer_thread(void *a, void *b, void *c) {
 
 
 		k_sleep(K_MSEC(measure_rate));
+		wait_for_motion_active();
 
     }
 }
@@ -1609,6 +1769,7 @@ void tap_thread(void *a, void *b, void *c) {
 	int64_t next_allowed = 0;
 
 	while (1) {
+		wait_for_motion_active();
 		float tap_x = linear_x;
 		float tap_y = linear_y;
 		float plane = sqrtf((tap_x * tap_x) + (tap_y * tap_y));
@@ -1659,6 +1820,7 @@ void tap_thread(void *a, void *b, void *c) {
 		}
 
 		k_sleep(K_MSEC(tap_reset_rate));
+		wait_for_motion_active();
 	}
 }
 
@@ -1822,7 +1984,6 @@ void reload_coordinates(const struct device *i2c_dev){
 
 	menu = -1;
 	first = 0;
-
 }
 
 
@@ -1912,6 +2073,7 @@ void ssd1306_power_on(const struct device *i2c_dev) {
 
 void off(const struct device *i2c_dev){
 	int err;
+	int trigger_err;
 
 	LOG_WRN("Entering deep sleep mode");
 	menu = -1;
@@ -1928,6 +2090,7 @@ void off(const struct device *i2c_dev){
 	k_mutex_lock(&state.mutex, K_FOREVER);
 	state.ready = false;
 	k_mutex_unlock(&state.mutex);
+	off_mode_active = true;
 
 	if (nrf_modem_gnss_stop() != 0) {
 		LOG_WRN("Failed to stop GNSS before deep sleep");
@@ -1935,14 +2098,66 @@ void off(const struct device *i2c_dev){
 	lte_disconnect();
 	lte_state = 0;
 
-	ssd1306_power_off(i2c_dev);
+	/* Clear the tap event that likely triggered OFF so we don't wake immediately. */
+	pop_tap_event();
+	pop_wake_request();
+	k_sem_reset(&wake_sem);
+	off_wake_reset_motion();
+	/* Give the board time to settle so the same OFF tap does not instantly wake it back up. */
+	off_wake_armed_after_ms = k_uptime_get() + 800;
+	{
+		struct sensor_value odr = {
+			.val1 = off_wake_odr_hz,
+			.val2 = 0,
+		};
+		int odr_err = sensor_attr_set(accel_sensor, SENSOR_CHAN_ACCEL_XYZ,
+					      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+		if (odr_err != 0) {
+			LOG_WRN("Unable to lower accelerometer ODR for OFF wake: %d", odr_err);
+		}
+	}
 
-	while (!pop_wake_request()) {
-		k_sleep(K_MSEC(100));
+	(void)wake_trigger;
+	(void)wake_trigger_handler;
+	trigger_err = -ENOTSUP;
+
+	ssd1306_power_off(i2c_dev);
+	tap_accept_after_ms = k_uptime_get() + (24LL * 60LL * 60LL * 1000LL);
+
+	if (trigger_err != 0) {
+		LOG_WRN("Using motion polling wake strategy");
+	}
+
+	int wait_ms = off_wake_idle_wait_ms;
+	while (1) {
+		if (k_sem_take(&wake_sem, K_MSEC(wait_ms)) == 0) {
+			break;
+		}
+
+		if (off_wake_poll_motion(k_uptime_get())) {
+			break;
+		}
+
+		wait_ms = off_wake_probe_active ? off_wake_fast_wait_ms : off_wake_idle_wait_ms;
+	}
+
+	(void)sensor_trigger_set(accel_sensor, &wake_trigger, NULL);
+	{
+		struct sensor_value odr = {
+			.val1 = active_odr_hz,
+			.val2 = 0,
+		};
+		int odr_err = sensor_attr_set(accel_sensor, SENSOR_CHAN_ACCEL_XYZ,
+					      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+		if (odr_err != 0) {
+			LOG_WRN("Unable to restore accelerometer ODR after OFF wake: %d", odr_err);
+		}
 	}
 
 	LOG_WRN("Waking from deep sleep");
 	ssd1306_power_on(i2c_dev);
+	draw_startup_logo(i2c_dev);
+	k_sleep(K_MSEC(logo_preview_ms));
 	clear_display(i2c_dev);
 
 	gps_capture_mode = GPS_CAPTURE_REACTIVATING;
@@ -1962,6 +2177,9 @@ void off(const struct device *i2c_dev){
 	state.ready = true;
 	k_condvar_broadcast(&state.cond);
 	k_mutex_unlock(&state.mutex);
+	off_mode_active = false;
+	off_wake_reset_motion();
+	tap_accept_after_ms = k_uptime_get() + tap_boot_guard_ms;
 
 }
 
@@ -2080,8 +2298,11 @@ int main(void)
 	k_mutex_init(&display_mutex);
 	k_mutex_init(&lte_mutex);
 	k_mutex_init(&tap_mutex);
+	k_mutex_init(&motion_mutex);
 	k_mutex_init(&state.mutex);
 	k_condvar_init(&state.cond);
+	k_condvar_init(&motion_cond);
+	k_sem_init(&wake_sem, 0, 1);
 	state.ready = false;
 	uint8_t x = 0, y = 0;
 	char message[128];
@@ -2106,13 +2327,9 @@ int main(void)
 	LOG_INF("I2C device is ready");
 	LOG_INF("GNSS antenna mode: %s", gnss_antenna_mode());
 
-	clear_display(i2c_dev); // Efface l'écran avant de dessiner
-    ssd1306_init(i2c_dev); // <-- Ajoute cette ligne ici
-
-
-	snprintf(message, sizeof(message), "%s %s", __DATE__, __TIME__);
-	write_line(i2c_dev, message, 0, 0, 1);
-	k_sleep(K_MSEC(600));
+	ssd1306_init(i2c_dev);
+	draw_startup_logo(i2c_dev);
+	k_sleep(K_MSEC(logo_preview_ms));
 
 	clear_display(i2c_dev);
 	snprintf(message, sizeof(message), "T: %2d U: %2d UN: %d", 0, 0, 0);
@@ -2125,15 +2342,27 @@ int main(void)
 	home_screen_cleared = true;
 	first = 0;
 
-    const struct device *lis2dh = DEVICE_DT_GET_ONE(st_lis2dh);
-    if (!device_is_ready(lis2dh)) {
+	accel_sensor = DEVICE_DT_GET_ONE(st_lis2dh);
+	if (!device_is_ready(accel_sensor)) {
         LOG_ERR("Erreur : LIS2DH non prêt\n");
 		while (true) {
 			k_sleep(K_SECONDS(1));
 		}
     }
 
-	k_thread_create(&accelerometer_data, accelerometer_stack, 1024,accelerometer_thread, (void *)lis2dh, NULL, NULL,5, 0, K_NO_WAIT);
+	{
+		struct sensor_value odr = {
+			.val1 = active_odr_hz,
+			.val2 = 0,
+		};
+		int odr_err = sensor_attr_set(accel_sensor, SENSOR_CHAN_ACCEL_XYZ,
+					      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+		if (odr_err != 0) {
+			LOG_WRN("Unable to set accelerometer sampling frequency: %d", odr_err);
+		}
+	}
+
+	k_thread_create(&accelerometer_data, accelerometer_stack, 1024,accelerometer_thread, (void *)accel_sensor, NULL, NULL,5, 0, K_NO_WAIT);
 	k_thread_create(&tap_data, tap_stack, 1024,tap_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
 	k_thread_create(&gps_data, gps_stack, 1024,gps_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
 
@@ -2215,6 +2444,7 @@ int main(void)
 		int layout_rows;
 		bool show_startup_stage = (startup_stage != STARTUP_STAGE_READY) || (targets_count <= 0);
 		uint8_t targets_base_y = show_startup_stage ? 32 : 24;
+
 		if (visible_targets > MAX_DISPLAY_TARGETS) {
 			visible_targets = MAX_DISPLAY_TARGETS;
 		}
@@ -2433,12 +2663,12 @@ for(int i=0;i<visible_targets;i++){
 			} else {
 				switch (tap) {
 				case TAP_UP:
-					/* Haut physique: descendre le curseur dans la liste. */
-					move_menu_cursor(i2c_dev, +1);
+					/* Haut physique: remonter le curseur dans la liste. */
+					move_menu_cursor(i2c_dev, -1);
 					break;
 				case TAP_DOWN:
-					/* Bas physique: remonter le curseur. */
-					move_menu_cursor(i2c_dev, -1);
+					/* Bas physique: descendre le curseur. */
+					move_menu_cursor(i2c_dev, +1);
 					break;
 				case TAP_LEFT:
 					/* Gauche physique: confirmer/entrer. */
@@ -2447,9 +2677,7 @@ for(int i=0;i<visible_targets;i++){
 					}
 					break;
 				case TAP_RIGHT:
-					/* Droite physique: retour page de base. */
-					exit_menu(i2c_dev);
-					first = 0;
+					/* Droite physique: inactif pour l'instant. */
 					break;
 				default:
 					break;

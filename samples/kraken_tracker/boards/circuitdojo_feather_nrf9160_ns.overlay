@@ -1,0 +1,9 @@
+/*
+ * Use the single LIS2DH IRQ line on this board for any-motion wake.
+ */
+
+&i2c1 {
+	lis2dh@18 {
+		anym-on-int1;
+	};
+};

@@ -1,0 +1,9 @@
+{
+  "circuitdojo_feather_nrf9160_ns": {
+    "extraConfFiles": [],
+    "extraOverlayFiles": [],
+    "extraCMakeDefines": [],
+    "manifest": "west.yml",
+    "manifestDir": "nfed"
+  }
+}
