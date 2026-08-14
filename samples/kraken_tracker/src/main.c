@@ -40,8 +40,10 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/dfu/flash_img.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/pm/pm.h>
 #include <zephyr/sys/reboot.h>
 #include <time.h>
+#include <hal/nrf_gpio.h>
 
 #include "battery.h"
 #include "spectre_logo.h"
@@ -207,13 +209,18 @@ static void draw_startup_logo(const struct device *i2c_dev)
 	uint8_t page_buf[SSD1306_WIDTH];
 	uint8_t src_x;
 	uint8_t src_page;
+	const uint8_t startup_logo_shift_up_pages = 0;
 
 	memset(framebuffer, 0, sizeof(framebuffer));
 	clear_display(i2c_dev);
 	for (src_page = 0; src_page < SSD1306_PAGES; src_page++) {
+		if (src_page < startup_logo_shift_up_pages) {
+			continue;
+		}
+
 		for (src_x = 0; src_x < SSD1306_WIDTH; src_x++) {
 			uint8_t column = spectre_logo_128x64[(src_page * SSD1306_WIDTH) + src_x];
-			framebuffer[src_x][src_page] = column;
+			framebuffer[src_x][src_page - startup_logo_shift_up_pages] = column;
 		}
 	}
 
@@ -1027,15 +1034,18 @@ static volatile int64_t menu_wake_first_motion_ms;
 static volatile int64_t menu_wake_last_motion_ms;
 static volatile int menu_wake_poll_streak;
 static volatile bool menu_wake_probe_active;
-static const float off_wake_start_threshold_ms2 = 1.20f;
-static const float off_wake_hold_threshold_ms2 = 0.60f;
-static const int off_wake_hold_ms = 700;
+static const float off_wake_start_threshold_ms2 = 2.20f;
+static const float off_wake_hold_threshold_ms2 = 1.20f;
+static const int off_wake_hold_ms = 1300;
 static const int off_wake_event_gap_ms = 180;
+static const int off_wake_required_streak = 8;
 static const int off_wake_idle_wait_ms = 250;
 static const int off_wake_fast_wait_ms = 30;
 static const int off_wake_odr_hz = 12;
 static const int active_odr_hz = 100;
 static const int logo_preview_ms = 5000;
+/* SAFE guarantees wake without IRQ routing; ECO uses System OFF for best power. */
+static bool off_use_system_off = false;
 static const struct sensor_trigger wake_trigger = {
 	.type = SENSOR_TRIG_DELTA,
 	.chan = SENSOR_CHAN_ACCEL_XYZ,
@@ -1142,7 +1152,7 @@ static bool menu_wake_poll_motion(int64_t now_ms)
 		return false;
 	}
 
-	if (++menu_wake_poll_streak < 4) {
+	if (++menu_wake_poll_streak < off_wake_required_streak) {
 		return false;
 	}
 
@@ -1173,7 +1183,7 @@ static bool off_wake_poll_motion(int64_t now_ms)
 		return false;
 	}
 
-	if (++off_wake_poll_streak < 4) {
+	if (++off_wake_poll_streak < off_wake_required_streak) {
 		return false;
 	}
 
@@ -1198,10 +1208,9 @@ const char *menu_str[] = {
     "EXIT MENU",
 	"GPS REACTIVATE",
 	"RELOAD COORDINATES",
-	"FW UPDATE",
 	"OFF"
 };
-int nb_menu = 5;
+int nb_menu = 4;
 
 K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
 K_THREAD_STACK_DEFINE(tap_stack, 1024);
@@ -1247,6 +1256,9 @@ static double active_point_lat;
 static double active_point_lon;
 static int64_t last_new_point_ms;
 static bool gps_seen_fix_since_reactivate;
+static volatile bool coordinates_fetch_running;
+
+static void coordinates_thread(void *a, void *b, void *c);
 
 #define GPS_NEW_POINT_MIN_DISTANCE_M 8
 #define GPS_DORMANT_TIMEOUT_MS 120000
@@ -2029,21 +2041,25 @@ if(lte_state == 0){
 }
 
 void reload_coordinates(const struct device *i2c_dev){
-
-	if(lte_state == 0){return;}
-
-	clear_display(i2c_dev);
-
-	uint8_t x = 0, y = 0;
-	char line[128];
-	snprintf(line,sizeof(line),"INITIALIZATION...");
-	write_line(i2c_dev, line, x, y, 0);
-
-
-	initial_connexion();
+	ARG_UNUSED(i2c_dev);
 
 	menu = -1;
 	first = 0;
+	gnss_display_dirty = true;
+	startup_stage = STARTUP_STAGE_GNSS_WARMUP;
+
+	if (!coordinates_fetch_running) {
+		coordinates_fetch_running = true;
+		if (k_thread_create(&coordinates_data, coordinates_stack,
+				   K_THREAD_STACK_SIZEOF(coordinates_stack),
+				   coordinates_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT) == NULL) {
+			coordinates_fetch_running = false;
+			startup_stage = STARTUP_STAGE_ERROR;
+			LOG_ERR("reload_coordinates: failed to start coordinates thread");
+		}
+	} else {
+		LOG_INF("reload_coordinates: fetch already running");
+	}
 }
 
 
@@ -2052,6 +2068,7 @@ void coordinates_thread(void *a, void *b, void *c)
 	ARG_UNUSED(a);
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
+	coordinates_fetch_running = true;
 
 	/* Give GNSS priority at boot to avoid starving early satellite acquisition. */
 	startup_stage = STARTUP_STAGE_GNSS_WARMUP;
@@ -2080,6 +2097,8 @@ void coordinates_thread(void *a, void *b, void *c)
 		startup_stage = STARTUP_STAGE_RETRY;
 		k_sleep(K_SECONDS(60));
 	}
+
+	coordinates_fetch_running = false;
 }
 void firmware_update(const struct device *i2c_dev){
 
@@ -2134,6 +2153,12 @@ void ssd1306_power_on(const struct device *i2c_dev) {
 void off(const struct device *i2c_dev){
 	int err;
 	int trigger_err;
+	int modem_err;
+	struct pm_state_info soft_off_state = {
+		.state = PM_STATE_SOFT_OFF,
+		.substate_id = 0,
+		.min_residency_us = 0,
+	};
 
 	LOG_WRN("Entering deep sleep mode");
 	menu = -1;
@@ -2155,7 +2180,18 @@ void off(const struct device *i2c_dev){
 	if (nrf_modem_gnss_stop() != 0) {
 		LOG_WRN("Failed to stop GNSS before deep sleep");
 	}
+
+	k_mutex_lock(&lte_mutex, K_FOREVER);
 	lte_disconnect();
+	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
+	if (err != 0) {
+		LOG_WRN("Failed to set modem power off mode: %d", err);
+	}
+	modem_err = nrf_modem_lib_shutdown();
+	if (modem_err != 0) {
+		LOG_WRN("Failed to shutdown modem library in OFF mode: %d", modem_err);
+	}
+	k_mutex_unlock(&lte_mutex);
 	lte_state = 0;
 
 	/* Clear the tap event that likely triggered OFF so we don't wake immediately. */
@@ -2164,7 +2200,7 @@ void off(const struct device *i2c_dev){
 	k_sem_reset(&wake_sem);
 	off_wake_reset_motion();
 	/* Give the board time to settle so the same OFF tap does not instantly wake it back up. */
-	off_wake_armed_after_ms = k_uptime_get() + 800;
+	off_wake_armed_after_ms = k_uptime_get() + 1500;
 	{
 		struct sensor_value odr = {
 			.val1 = off_wake_odr_hz,
@@ -2179,15 +2215,31 @@ void off(const struct device *i2c_dev){
 
 	(void)wake_trigger;
 	(void)wake_trigger_handler;
-	trigger_err = -ENOTSUP;
+	trigger_err = sensor_trigger_set(accel_sensor, &wake_trigger, wake_trigger_handler);
+	if (trigger_err != 0) {
+		LOG_WRN("Unable to arm accelerometer wake trigger: %d", trigger_err);
+	}
+
+	/* Ensure IRQ pin has wake sense enabled for System OFF wake-up. */
+	nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(DT_NODELABEL(lis2dh), irq_gpios),
+			  NRF_GPIO_PIN_NOPULL);
+	nrf_gpio_cfg_sense_set(NRF_DT_GPIOS_TO_PSEL(DT_NODELABEL(lis2dh), irq_gpios),
+			      NRF_GPIO_PIN_SENSE_HIGH);
 
 	ssd1306_power_off(i2c_dev);
 	tap_accept_after_ms = k_uptime_get() + (24LL * 60LL * 60LL * 1000LL);
 
-	if (trigger_err != 0) {
-		LOG_WRN("Using motion polling wake strategy");
+	if (off_use_system_off) {
+		LOG_WRN("OFF ECO: entering System OFF (wake on LIS2DH motion IRQ)");
+		pm_state_force(0u, &soft_off_state);
+		k_sleep(K_FOREVER);
+
+		/* If we ever return here, force a clean restart as a safety fallback. */
+		LOG_ERR("System OFF failed; forcing cold reboot");
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 
+	LOG_WRN("OFF SAFE: using motion polling wake strategy");
 	int wait_ms = off_wake_idle_wait_ms;
 	while (1) {
 		if (k_sem_take(&wake_sem, K_MSEC(wait_ms)) == 0) {
@@ -2202,48 +2254,8 @@ void off(const struct device *i2c_dev){
 	}
 
 	(void)sensor_trigger_set(accel_sensor, &wake_trigger, NULL);
-	{
-		struct sensor_value odr = {
-			.val1 = active_odr_hz,
-			.val2 = 0,
-		};
-		int odr_err = sensor_attr_set(accel_sensor, SENSOR_CHAN_ACCEL_XYZ,
-					      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
-		if (odr_err != 0) {
-			LOG_WRN("Unable to restore accelerometer ODR after OFF wake: %d", odr_err);
-		}
-	}
-
-	LOG_WRN("Waking from deep sleep");
-	ssd1306_power_on(i2c_dev);
-	draw_startup_logo(i2c_dev);
-	k_sleep(K_MSEC(logo_preview_ms));
-	clear_display(i2c_dev);
-
-	gps_capture_mode = GPS_CAPTURE_REACTIVATING;
-	gps_seen_fix_since_reactivate = false;
-	active_point_valid = false;
-	last_new_point_ms = 0;
-	last_fix = 0;
-	startup_stage = STARTUP_STAGE_GNSS_WARMUP;
-	gnss_display_dirty = true;
-
-	err = gnss_init_and_start();
-	if (err != 0) {
-		LOG_ERR("Failed to restart GNSS after deep sleep");
-		startup_stage = STARTUP_STAGE_ERROR;
-	} else {
-		/* OFF wake is a runtime resume, not a fresh startup sequence. */
-		startup_stage = (targets_count > 0) ? STARTUP_STAGE_READY : STARTUP_STAGE_RETRY;
-	}
-
-	k_mutex_lock(&state.mutex, K_FOREVER);
-	state.ready = true;
-	k_condvar_broadcast(&state.cond);
-	k_mutex_unlock(&state.mutex);
-	off_mode_active = false;
-	off_wake_reset_motion();
-	tap_accept_after_ms = k_uptime_get() + tap_boot_guard_ms;
+	LOG_WRN("OFF SAFE wake detected: rebooting for full cold boot session");
+	sys_reboot(SYS_REBOOT_COLD);
 
 }
 
@@ -2343,9 +2355,6 @@ static void execute_menu_selection(const struct device *i2c_dev)
 		first = 0;
 		break;
 	case 3:
-		LOG_WRN("Firmware update disabled during diagnostics");
-		break;
-	case 4:
 		off(i2c_dev);
 		break;
 	default:
