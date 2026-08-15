@@ -2240,8 +2240,67 @@ void off(const struct device *i2c_dev){
 	}
 
 	LOG_WRN("OFF SAFE: using motion polling wake strategy");
+	bool charge_screen_on = false;
+	uint8_t charge_displayed_pct = 0xFF;
+	int charge_prev_mv = -1;
+	int charge_rise_score = 0;
+	int64_t next_charge_poll_ms = 0;
+	char charge_line[32];
 	int wait_ms = off_wake_idle_wait_ms;
 	while (1) {
+		int64_t now_ms = k_uptime_get();
+
+		if (now_ms >= next_charge_poll_ms) {
+			uint8_t batt_pct = 0;
+			int batt_mv = 0;
+			bool likely_external_power = false;
+
+			next_charge_poll_ms = now_ms + 5000;
+			if (board_battery_percent_get(&batt_pct, &batt_mv) == 0) {
+				/* Heuristic: charging input is likely present if VBAT is already high,
+				 * or rises repeatedly between OFF samples.
+				 */
+				if (batt_mv >= 4180) {
+					likely_external_power = true;
+				}
+				if (charge_prev_mv >= 0) {
+					if (batt_mv >= charge_prev_mv + 8) {
+						if (charge_rise_score < 3) {
+							charge_rise_score++;
+						}
+					} else if (batt_mv + 4 < charge_prev_mv) {
+						if (charge_rise_score > 0) {
+							charge_rise_score--;
+						}
+					}
+				}
+				charge_prev_mv = batt_mv;
+				if (charge_rise_score >= 2) {
+					likely_external_power = true;
+				}
+
+				if (likely_external_power) {
+					if (!charge_screen_on) {
+						ssd1306_power_on(i2c_dev);
+						clear_display(i2c_dev);
+						charge_screen_on = true;
+						charge_displayed_pct = 0xFF;
+					}
+					if (charge_displayed_pct != batt_pct) {
+						write_line(i2c_dev, "CHARGING       ", 0, 16, 1);
+						snprintf(charge_line, sizeof(charge_line), "%2u%%", batt_pct);
+						write_line(i2c_dev, charge_line, 0, 24, 1);
+						charge_displayed_pct = batt_pct;
+					}
+				} else if (charge_screen_on) {
+					clear_display(i2c_dev);
+					ssd1306_power_off(i2c_dev);
+					charge_screen_on = false;
+					charge_displayed_pct = 0xFF;
+				}
+			}
+		}
+
 		if (k_sem_take(&wake_sem, K_MSEC(wait_ms)) == 0) {
 			break;
 		}
