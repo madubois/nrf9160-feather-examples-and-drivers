@@ -2150,6 +2150,227 @@ void ssd1306_power_on(const struct device *i2c_dev) {
 	k_mutex_unlock(&display_mutex);
 }
 
+static bool font_5x7_pixel_on(char c, int col, int row)
+{
+	if (c < 32 || c > 127 || col < 0 || col >= 5 || row < 0 || row >= 7) {
+		return false;
+	}
+
+	return (font_5x7[c - 32][col] & (1U << row)) != 0U;
+}
+
+static void draw_refined_scaled_char(const struct device *i2c_dev, char c, uint8_t x, uint8_t y, uint8_t scale)
+{
+	if (c < 32 || c > 127 || scale == 0) {
+		return;
+	}
+
+	/* At small sizes (scale 1-2), keep full pixels to preserve thin strokes like '%'. */
+	if (scale <= 2U) {
+		for (int col = 0; col < 5; col++) {
+			for (int row = 0; row < 7; row++) {
+				if (!font_5x7_pixel_on(c, col, row)) {
+					continue;
+				}
+				for (uint8_t sx = 0; sx < scale; sx++) {
+					for (uint8_t sy = 0; sy < scale; sy++) {
+						uint16_t px = x + ((uint16_t)col * scale) + sx;
+						uint16_t py = y + ((uint16_t)row * scale) + sy;
+						if (px < SSD1306_WIDTH && py < SSD1306_HEIGHT) {
+							allumer_pixel(i2c_dev, (uint8_t)px, (uint8_t)py);
+						}
+					}
+				}
+			}
+		}
+		return;
+	}
+
+	for (int col = 0; col < 5; col++) {
+		for (int row = 0; row < 7; row++) {
+			if (!font_5x7_pixel_on(c, col, row)) {
+				continue;
+			}
+
+			bool north = font_5x7_pixel_on(c, col, row - 1);
+			bool south = font_5x7_pixel_on(c, col, row + 1);
+			bool west = font_5x7_pixel_on(c, col - 1, row);
+			bool east = font_5x7_pixel_on(c, col + 1, row);
+
+			for (uint8_t sx = 0; sx < scale; sx++) {
+				for (uint8_t sy = 0; sy < scale; sy++) {
+					bool skip = false;
+
+					/* Trim block corners when neighbors are missing to soften curves. */
+					if (!north && !west && sx == 0U && sy == 0U) {
+						skip = true;
+					}
+					if (!north && !east && sx == (scale - 1U) && sy == 0U) {
+						skip = true;
+					}
+					if (!south && !west && sx == 0U && sy == (scale - 1U)) {
+						skip = true;
+					}
+					if (!south && !east && sx == (scale - 1U) && sy == (scale - 1U)) {
+						skip = true;
+					}
+
+					if (!skip) {
+						uint16_t px = x + ((uint16_t)col * scale) + sx;
+						uint16_t py = y + ((uint16_t)row * scale) + sy;
+						if (px < SSD1306_WIDTH && py < SSD1306_HEIGHT) {
+							allumer_pixel(i2c_dev, (uint8_t)px, (uint8_t)py);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+static void draw_hline(const struct device *i2c_dev, int x0, int x1, int y)
+{
+	if (y < 0 || y >= SSD1306_HEIGHT) {
+		return;
+	}
+	if (x0 > x1) {
+		int tmp = x0;
+		x0 = x1;
+		x1 = tmp;
+	}
+	if (x1 < 0 || x0 >= SSD1306_WIDTH) {
+		return;
+	}
+	if (x0 < 0) {
+		x0 = 0;
+	}
+	if (x1 >= SSD1306_WIDTH) {
+		x1 = SSD1306_WIDTH - 1;
+	}
+	for (int x = x0; x <= x1; x++) {
+		allumer_pixel(i2c_dev, (uint8_t)x, (uint8_t)y);
+	}
+}
+
+static void draw_vline(const struct device *i2c_dev, int x, int y0, int y1)
+{
+	if (x < 0 || x >= SSD1306_WIDTH) {
+		return;
+	}
+	if (y0 > y1) {
+		int tmp = y0;
+		y0 = y1;
+		y1 = tmp;
+	}
+	if (y1 < 0 || y0 >= SSD1306_HEIGHT) {
+		return;
+	}
+	if (y0 < 0) {
+		y0 = 0;
+	}
+	if (y1 >= SSD1306_HEIGHT) {
+		y1 = SSD1306_HEIGHT - 1;
+	}
+	for (int y = y0; y <= y1; y++) {
+		allumer_pixel(i2c_dev, (uint8_t)x, (uint8_t)y);
+	}
+}
+
+static void draw_charge_battery_icon(const struct device *i2c_dev, uint8_t center_x, uint8_t top_y)
+{
+	const int body_w = 72;
+	const int body_h = 28;
+	const int body_left = (int)center_x - (body_w / 2);
+	const int body_top = (int)top_y;
+	const int body_right = body_left + body_w - 1;
+	const int body_bottom = body_top + body_h - 1;
+	const int nub_w = 8;
+	const int nub_h = 12;
+	const int nub_left = body_right + 1;
+	const int nub_top = body_top + ((body_h - nub_h) / 2);
+
+	/* Outer frame with slight corner rounding. */
+	draw_hline(i2c_dev, body_left + 4, body_right - 4, body_top);
+	draw_hline(i2c_dev, body_left + 4, body_right - 4, body_top + 1);
+	draw_hline(i2c_dev, body_left + 4, body_right - 4, body_bottom - 1);
+	draw_hline(i2c_dev, body_left + 4, body_right - 4, body_bottom);
+	draw_vline(i2c_dev, body_left, body_top + 4, body_bottom - 4);
+	draw_vline(i2c_dev, body_left + 1, body_top + 4, body_bottom - 4);
+	draw_vline(i2c_dev, body_right - 1, body_top + 4, body_bottom - 4);
+	draw_vline(i2c_dev, body_right, body_top + 4, body_bottom - 4);
+
+	/* Rounded corner pixels. */
+	allumer_pixel(i2c_dev, (uint8_t)(body_left + 2), (uint8_t)(body_top + 2));
+	allumer_pixel(i2c_dev, (uint8_t)(body_left + 3), (uint8_t)(body_top + 1));
+	allumer_pixel(i2c_dev, (uint8_t)(body_right - 2), (uint8_t)(body_top + 2));
+	allumer_pixel(i2c_dev, (uint8_t)(body_right - 3), (uint8_t)(body_top + 1));
+	allumer_pixel(i2c_dev, (uint8_t)(body_left + 2), (uint8_t)(body_bottom - 2));
+	allumer_pixel(i2c_dev, (uint8_t)(body_left + 3), (uint8_t)(body_bottom - 1));
+	allumer_pixel(i2c_dev, (uint8_t)(body_right - 2), (uint8_t)(body_bottom - 2));
+	allumer_pixel(i2c_dev, (uint8_t)(body_right - 3), (uint8_t)(body_bottom - 1));
+
+	/* Terminal nub on the right side. */
+	draw_hline(i2c_dev, nub_left, nub_left + nub_w - 1, nub_top);
+	draw_hline(i2c_dev, nub_left, nub_left + nub_w - 1, nub_top + nub_h - 1);
+	draw_vline(i2c_dev, nub_left, nub_top, nub_top + nub_h - 1);
+	draw_vline(i2c_dev, nub_left + nub_w - 1, nub_top, nub_top + nub_h - 1);
+
+	/* Filled lightning bolt, centered in battery body. */
+	static const uint32_t bolt_rows[14] = {
+		0x000700, 0x000F80, 0x001FC0, 0x00FFF0,
+		0x07FFE0, 0x03FF00, 0x007FC0, 0x003FE0,
+		0x01FFF8, 0x007FFC, 0x001FF8, 0x000FE0,
+		0x0007C0, 0x000300,
+	};
+	const int bolt_w = 20;
+	const int bolt_h = (int)ARRAY_SIZE(bolt_rows);
+	const int bolt_left = (int)center_x - (bolt_w / 2);
+	const int bolt_top = body_top + ((body_h - bolt_h) / 2);
+
+	for (int row = 0; row < bolt_h; row++) {
+		uint32_t bits = bolt_rows[row];
+		for (int col = 0; col < bolt_w; col++) {
+			if (bits & (1U << (bolt_w - 1 - col))) {
+				int px = bolt_left + col;
+				int py = bolt_top + row;
+				if (px >= 0 && py >= 0 && px < SSD1306_WIDTH && py < SSD1306_HEIGHT) {
+					allumer_pixel(i2c_dev, (uint8_t)px, (uint8_t)py);
+				}
+			}
+		}
+	}
+}
+
+static void draw_charge_screen(const struct device *i2c_dev, uint8_t batt_pct)
+{
+	char pct_line[8];
+	const uint8_t text_scale = 2;
+	const uint8_t char_w = 5 * text_scale;
+	const uint8_t char_gap = 2;
+	const uint8_t text_h = 7 * text_scale;
+	int text_w;
+	int text_x;
+	int text_y;
+
+	snprintf(pct_line, sizeof(pct_line), "%u%%", batt_pct);
+	text_w = ((int)strlen(pct_line) * char_w) + (((int)strlen(pct_line) - 1) * char_gap);
+	text_x = (SSD1306_WIDTH - text_w) / 2;
+	text_y = (SSD1306_HEIGHT - text_h) / 2;
+	if (text_x < 0) {
+		text_x = 0;
+	}
+	if (text_y < 0) {
+		text_y = 0;
+	}
+
+	clear_display(i2c_dev);
+
+	for (size_t i = 0; i < strlen(pct_line); i++) {
+		draw_refined_scaled_char(i2c_dev, pct_line[i], (uint8_t)text_x, (uint8_t)text_y, text_scale);
+		text_x += char_w + char_gap;
+	}
+}
+
 void off(const struct device *i2c_dev){
 	int err;
 	int trigger_err;
@@ -2245,7 +2466,6 @@ void off(const struct device *i2c_dev){
 	int charge_prev_mv = -1;
 	int charge_rise_score = 0;
 	int64_t next_charge_poll_ms = 0;
-	char charge_line[32];
 	int wait_ms = off_wake_idle_wait_ms;
 	while (1) {
 		int64_t now_ms = k_uptime_get();
@@ -2287,9 +2507,7 @@ void off(const struct device *i2c_dev){
 						charge_displayed_pct = 0xFF;
 					}
 					if (charge_displayed_pct != batt_pct) {
-						write_line(i2c_dev, "CHARGING       ", 0, 16, 1);
-						snprintf(charge_line, sizeof(charge_line), "%2u%%", batt_pct);
-						write_line(i2c_dev, charge_line, 0, 24, 1);
+						draw_charge_screen(i2c_dev, batt_pct);
 						charge_displayed_pct = batt_pct;
 					}
 				} else if (charge_screen_on) {
