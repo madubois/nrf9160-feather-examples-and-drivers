@@ -927,6 +927,7 @@ time_t ts[5];
 #define HTTP_HOST "plongee.duckdns.org"
 #define HTTP_PATH "/targets"
 #define HTTP_PATH_LONG "/coords"
+#define HTTP_PATH_MANUAL_POINT "/api/manual-point"
 #define HTTP_PORT 8545
 #define MAX_MTU_SIZE     2000
 #define RECV_BUF_SIZE    2048
@@ -1304,6 +1305,16 @@ static const char *startup_stage_text(uint8_t stage)
 	}
 }
 
+static void show_startup_feedback_screen(const struct device *i2c_dev, uint8_t stage)
+{
+	char message[64];
+
+	draw_target_rows_layout(i2c_dev, 0, 32);
+	write_line(i2c_dev, "                ", 0, 24, 1);
+	snprintf(message, sizeof(message), "%s", startup_stage_text(stage));
+	write_line(i2c_dev, message, 0, 24, 1);
+}
+
 
 
 
@@ -1386,6 +1397,26 @@ int blocking_send(int fd, uint8_t *buf, uint32_t size, uint32_t flags)
 	} while (err < 0 && errno == EAGAIN);
 
 	return err;
+}
+
+static int send_all(int fd, const uint8_t *buf, size_t len)
+{
+	size_t offset = 0;
+
+	while (offset < len) {
+		int sent = blocking_send(fd, (uint8_t *)buf + offset, len - offset, 0);
+
+		if (sent < 0) {
+			return sent;
+		}
+		if (sent == 0) {
+			return -EIO;
+		}
+
+		offset += (size_t)sent;
+	}
+
+	return 0;
 }
 
 int blocking_connect(int fd, struct sockaddr *local_addr, socklen_t len)
@@ -1680,6 +1711,135 @@ void flash_firmware(){
 void send_to_cloud(void)
 {
 	LOG_INF("send_to_cloud: skipped during LTE diagnostics");
+}
+
+static bool menu_can_add_coordinate(void)
+{
+	return active_point_valid && (last_fix == 0);
+}
+
+static const char *menu_item_text(int index)
+{
+	switch (index) {
+	case 0:
+		return "EXIT MENU";
+	case 1:
+		return menu_can_add_coordinate() ? "ADD COORDINATE" : "GPS REACTIVATE";
+	case 2:
+		return "RELOAD COORDINATES";
+	case 3:
+		return "OFF";
+	default:
+		return "";
+	}
+}
+
+static int send_manual_coordinate(double latitude, double longitude)
+{
+	int err = 0;
+	struct sockaddr_in local_addr;
+	struct addrinfo *res = NULL;
+	int client_fd = -1;
+	char body[96];
+	int request_len;
+	const struct device *display = i2c_dev;
+
+	k_mutex_lock(&lte_mutex, K_FOREVER);
+	show_startup_feedback_screen(display, STARTUP_STAGE_LTE_CONNECT);
+	lte_connect();
+
+	local_addr.sin_family = AF_INET;
+	local_addr.sin_port = htons(0);
+	local_addr.sin_addr.s_addr = 0;
+
+	struct addrinfo hints = {
+		.ai_family = AF_INET,
+		.ai_socktype = SOCK_STREAM,
+		.ai_next = NULL,
+		.ai_addr = NULL,
+		.ai_protocol = 0,
+	};
+
+	err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
+	if (err != 0 || res == NULL) {
+		LOG_ERR("manual point: getaddrinfo failed: %d", err);
+		err = (err != 0) ? err : -ENOENT;
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_disconnect;
+	}
+
+	((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (client_fd < 0) {
+		err = -errno;
+		LOG_ERR("manual point: socket failed: %d", err);
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_free;
+	}
+
+	err = bind(client_fd, (struct sockaddr *)&local_addr, sizeof(local_addr));
+	if (err < 0) {
+		LOG_ERR("manual point: bind failed: %d", err);
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_close;
+	}
+
+	show_startup_feedback_screen(display, STARTUP_STAGE_HTTP_REQUEST);
+	err = blocking_connect(client_fd, (struct sockaddr *)res->ai_addr, sizeof(struct sockaddr_in));
+	if (err < 0) {
+		LOG_ERR("manual point: connect failed: %d", err);
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_close;
+	}
+
+	request_len = snprintf(body, sizeof(body), "{\"lat\":%.6f,\"lng\":%.6f}", latitude, longitude);
+	if (request_len < 0 || request_len >= (int)sizeof(body)) {
+		err = -EMSGSIZE;
+		LOG_ERR("manual point: JSON body too large");
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_close;
+	}
+
+	request_len = snprintf(send_buf, sizeof(send_buf),
+			       "POST %s HTTP/1.1\r\n"
+			       "Host: %s\r\n"
+			       "Content-Type: application/json\r\n"
+			       "Content-Length: %d\r\n"
+			       "Connection: close\r\n\r\n"
+			       "%s",
+			       HTTP_PATH_MANUAL_POINT, HTTP_HOST, (int)strlen(body), body);
+	if (request_len < 0 || request_len >= (int)sizeof(send_buf)) {
+		err = -EMSGSIZE;
+		LOG_ERR("manual point: HTTP request too large");
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_close;
+	}
+
+	show_startup_feedback_screen(display, STARTUP_STAGE_WAIT_SERVER);
+	err = send_all(client_fd, (const uint8_t *)send_buf, (size_t)request_len);
+	if (err < 0) {
+		LOG_ERR("manual point: send failed: %d", err);
+		show_startup_feedback_screen(display, STARTUP_STAGE_ERROR);
+		goto out_close;
+	}
+
+	LOG_INF("manual point sent: lat=%.6f lng=%.6f", latitude, longitude);
+	show_startup_feedback_screen(display, STARTUP_STAGE_READY);
+
+out_close:
+	if (client_fd >= 0) {
+		close(client_fd);
+	}
+out_free:
+	if (res != NULL) {
+		freeaddrinfo(res);
+	}
+out_disconnect:
+	lte_disconnect();
+	k_mutex_unlock(&lte_mutex);
+
+	return err;
 }
 
 float sensor_value_to_float(const struct sensor_value *val)
@@ -2477,12 +2637,9 @@ void off(const struct device *i2c_dev){
 
 			next_charge_poll_ms = now_ms + 5000;
 			if (board_battery_percent_get(&batt_pct, &batt_mv) == 0) {
-				/* Heuristic: charging input is likely present if VBAT is already high,
-				 * or rises repeatedly between OFF samples.
+				/* Heuristic: charging input is likely present if VBAT rises repeatedly
+				 * between OFF samples.
 				 */
-				if (batt_mv >= 4180) {
-					likely_external_power = true;
-				}
 				if (charge_prev_mv >= 0) {
 					if (batt_mv >= charge_prev_mv + 8) {
 						if (charge_rise_score < 3) {
@@ -2560,7 +2717,7 @@ static void draw_menu_screen(const struct device *i2c_dev)
 	clear_display(i2c_dev);
 
 	for (int i = 0; i < nb_menu; i++) {
-		snprintf(message, sizeof(message), "%s", menu_str[i]);
+		snprintf(message, sizeof(message), "%s", menu_item_text(i));
 		write_line(i2c_dev, message, 6, y, 0);
 
 		y += 8;
@@ -2590,7 +2747,7 @@ static void move_menu_cursor(const struct device *i2c_dev, int delta)
 
 static void execute_menu_selection(const struct device *i2c_dev)
 {
-	LOG_INF("MENU CHOISI: %s", menu_str[menu]);
+	LOG_INF("MENU CHOISI: %s", menu_item_text(menu));
 
 	switch (menu) {
 	case 0:
@@ -2604,6 +2761,22 @@ static void execute_menu_selection(const struct device *i2c_dev)
 		last_longitude = 0;
 		break;
 	case 1:
+		if (menu_can_add_coordinate()) {
+			int upload_err = send_manual_coordinate(active_point_lat, active_point_lon);
+			if (upload_err == 0) {
+				LOG_INF("Manual coordinate uploaded successfully");
+				exit_menu(i2c_dev);
+				first = 0;
+				show_startup_feedback_screen(i2c_dev, STARTUP_STAGE_READY);
+				reload_coordinates(i2c_dev);
+			} else {
+				LOG_WRN("Manual coordinate upload failed: %d", upload_err);
+				exit_menu(i2c_dev);
+				first = 0;
+			}
+			break;
+		}
+
 		gps_capture_mode = GPS_CAPTURE_ACTIVE;
 		last_new_point_ms = k_uptime_get();
 		gps_seen_fix_since_reactivate = false;

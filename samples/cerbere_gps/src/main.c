@@ -851,14 +851,6 @@ struct sockaddr_in local_addr;
 
 }
 
-
-
-
-
-
-
-
-
     freeaddrinfo(res);
 int ret;
   ret = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
