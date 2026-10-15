@@ -4,6 +4,12 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
+config KRAKEN_TEMP_GPS_TEST
+	bool "Temporary GNSS hardware test build"
+	default n
+	help
+	  Disable cellular-dependent tracker features and use the temporary GPS targets.
+
 menu "GNSS sample"
 
 choice

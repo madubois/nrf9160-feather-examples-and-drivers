@@ -39,6 +39,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/dfu/flash_img.h>
+#include <net/fota_download.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/pm/pm.h>
 #include <zephyr/sys/reboot.h>
@@ -530,6 +531,19 @@ static struct k_work_q gnss_work_q;
 K_THREAD_STACK_DEFINE(gnss_workq_stack_area, GNSS_WORKQ_THREAD_STACK_SIZE);
 #endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE || CONFIG_GNSS_SAMPLE_MODE_TTFF_TEST */
 
+#if defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE)
+static void gnss_event_handler(int event)
+{
+	if (event == NRF_MODEM_GNSS_EVT_PVT &&
+	    nrf_modem_gnss_read(&last_pvt, sizeof(last_pvt), NRF_MODEM_GNSS_DATA_PVT) == 0) {
+		k_mutex_lock(&state.mutex, K_FOREVER);
+		state.ready = true;
+		k_condvar_broadcast(&state.cond);
+		k_mutex_unlock(&state.mutex);
+	}
+}
+#endif
+
 #if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE)
 #include "assistance.h"
 
@@ -667,17 +681,6 @@ static void agps_data_get_work_fn(struct k_work *item)
 }
 #endif /* !CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE */
 
-	#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) && !defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
-	static int startup_assistance_preload(void)
-	{
-		LOG_INF("A-GPS startup preload skipped");
-		return 0;
-	}
-	#endif
-
-
-
-
 static void date_time_evt_handler(const struct date_time_evt *evt)
 {
 	k_sem_give(&time_sem);
@@ -695,6 +698,13 @@ static int modem_init(void)
 	}
 
 #if defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
+	#if defined(CONFIG_KRAKEN_TEMP_GPS_TEST)
+	if (lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_GPS,
+				   LTE_LC_SYSTEM_MODE_PREFER_AUTO) != 0) {
+		LOG_ERR("Failed to set GNSS-only modem system mode");
+		return -1;
+	}
+	#endif
 	LOG_INF("Strict GNSS-only test mode: leaving LTE deactivated");
 	return 0;
 #endif
@@ -763,7 +773,7 @@ static int sample_init(void)
 	return err;
 }
 
-static int gnss_init_and_start(void)
+static int gnss_init(void)
 {
 
 
@@ -854,23 +864,17 @@ static int gnss_init_and_start(void)
 	}
 
 
-#if !defined(CONFIG_GNSS_SAMPLE_ASSISTANCE_NONE) && !defined(CONFIG_GNSS_SAMPLE_STRICT_GNSS_ONLY)
-	/* Preload assistance at startup to improve cold-start TTFF. */
-	int preload_err = startup_assistance_preload();
-	if (preload_err) {
-		LOG_WRN("A-GPS startup preload returned error: %d", preload_err);
-	} else {
-		LOG_INF("A-GPS startup preload completed");
-	}
-#endif
+	return 0;
+}
 
+static int gnss_start_capture(void)
+{
 	log_modem_state("Before GNSS start");
 
 	if (nrf_modem_gnss_start() != 0) {
 		LOG_ERR("Failed to start GNSS");
 		return -1;
 	}
-
 
 	return 0;
 }
@@ -897,9 +901,17 @@ static int gnss_init_and_start(void)
 
 
 
+#if defined(CONFIG_KRAKEN_TEMP_GPS_TEST)
+float targets[10] = {
+	44.439851854f, -73.232795406f,
+	44.441300f, -73.236700f,
+};
+int targets_count = 2;
+#else
 float targets[10];
-const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 int targets_count = 0;
+#endif
+const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
 uint8_t last_tracked = 0;
 uint8_t last_in_fix = 0;
@@ -929,6 +941,38 @@ time_t ts[5];
 #define HTTP_PATH_LONG "/coords"
 #define HTTP_PATH_MANUAL_POINT "/api/manual-point"
 #define HTTP_PORT 8545
+#define OTA_MANIFEST_PATH "/ota/manifest"
+#define OTA_FIRMWARE_PATH "firmware"
+#define OTA_HTTP_HOST "plongee.duckdns.org:8545"
+
+static volatile bool ota_download_started;
+static volatile int ota_download_progress = -1;
+static volatile bool ota_download_failed;
+
+static void ota_download_handler(const struct fota_download_evt *evt)
+{
+	switch (evt->id) {
+	case FOTA_DOWNLOAD_EVT_PROGRESS:
+		ota_download_progress = evt->progress;
+		break;
+	case FOTA_DOWNLOAD_EVT_FINISHED:
+		LOG_INF("OTA image verified; rebooting into MCUboot update");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	case FOTA_DOWNLOAD_EVT_ERROR:
+		LOG_ERR("OTA download failed (cause %d)", evt->cause);
+		ota_download_started = false;
+		ota_download_failed = true;
+		break;
+	case FOTA_DOWNLOAD_EVT_CANCELLED:
+		LOG_WRN("OTA download cancelled");
+		ota_download_started = false;
+		ota_download_failed = true;
+		break;
+	default:
+		break;
+	}
+}
 #define MAX_MTU_SIZE     2000
 #define RECV_BUF_SIZE    2048
 #define SEND_BUF_SIZE    MAX_MTU_SIZE
@@ -1060,6 +1104,7 @@ static float tap_direction_margin = 0.40f;
 static int tap_direction_window_ms = 20;
 static float tap_peak_weight = 0.60f;
 static int tap_deadtime_ms = 250;
+static int tap_impulse_timeout_ms = 250;
 static int tap_boot_guard_ms = 7000;
 static int tap_menu_confirm_guard_ms = 450;
 
@@ -1138,19 +1183,17 @@ static bool menu_wake_poll_motion(int64_t now_ms)
 
 	linear_mag = sqrtf((lx * lx) + (ly * ly) + (lz * lz));
 
-	if (linear_mag < off_wake_start_threshold_ms2) {
-		menu_wake_reset_motion();
-		return false;
-	}
-
 	if (!menu_wake_probe_active) {
+		if (linear_mag < off_wake_start_threshold_ms2) {
+			menu_wake_reset_motion();
+			return false;
+		}
 		menu_wake_probe_active = true;
-	}
-
-	if (linear_mag < off_wake_hold_threshold_ms2) {
-		menu_wake_reset_motion();
-		menu_wake_probe_active = true;
-		return false;
+	} else {
+		if (linear_mag < off_wake_hold_threshold_ms2) {
+			menu_wake_reset_motion();
+			return false;
+		}
 	}
 
 	if (++menu_wake_poll_streak < off_wake_required_streak) {
@@ -1169,19 +1212,17 @@ static bool off_wake_poll_motion(int64_t now_ms)
 
 	linear_mag = sqrtf((lx * lx) + (ly * ly) + (lz * lz));
 
-	if (linear_mag < off_wake_start_threshold_ms2) {
-		off_wake_reset_motion();
-		return false;
-	}
-
 	if (!off_wake_probe_active) {
+		if (linear_mag < off_wake_start_threshold_ms2) {
+			off_wake_reset_motion();
+			return false;
+		}
 		off_wake_probe_active = true;
-	}
-
-	if (linear_mag < off_wake_hold_threshold_ms2) {
-		off_wake_reset_motion();
-		off_wake_probe_active = true;
-		return false;
+	} else {
+		if (linear_mag < off_wake_hold_threshold_ms2) {
+			off_wake_reset_motion();
+			return false;
+		}
 	}
 
 	if (++off_wake_poll_streak < off_wake_required_streak) {
@@ -1211,7 +1252,7 @@ const char *menu_str[] = {
 	"RELOAD COORDINATES",
 	"OFF"
 };
-int nb_menu = 4;
+int nb_menu = IS_ENABLED(CONFIG_KRAKEN_TEMP_GPS_TEST) ? 3 : 4;
 
 K_THREAD_STACK_DEFINE(accelerometer_stack, 1024);
 K_THREAD_STACK_DEFINE(tap_stack, 1024);
@@ -1274,6 +1315,7 @@ enum startup_stage {
 	STARTUP_STAGE_PARSE,
 	STARTUP_STAGE_READY,
 	STARTUP_STAGE_RETRY,
+	STARTUP_STAGE_OTA_DOWNLOAD,
 	STARTUP_STAGE_ERROR,
 };
 
@@ -1300,6 +1342,8 @@ static const char *startup_stage_text(uint8_t stage)
 		return "READY";
 	case STARTUP_STAGE_RETRY:
 		return "RETRY 60S";
+	case STARTUP_STAGE_OTA_DOWNLOAD:
+		return "OTA DOWNLOAD";
 	default:
 		return "NET ERROR";
 	}
@@ -1596,6 +1640,128 @@ void initial_connexion(){
 	}
 }
 
+static bool ota_check_and_start(void)
+{
+	struct addrinfo hints = {
+		.ai_family = AF_INET,
+		.ai_socktype = SOCK_DGRAM,
+	};
+	struct addrinfo *res;
+	struct sockaddr_in local_addr = {
+		.sin_family = AF_INET,
+		.sin_port = htons(0),
+		.sin_addr.s_addr = 0,
+	};
+	char request[160];
+	char response[512] = { 0 };
+	struct timeval recv_timeout = { .tv_sec = 5, .tv_usec = 0 };
+	int fd;
+	int err;
+	int received;
+	size_t response_len = 0;
+	bool update_available;
+	char manifest_version[32] = { 0 };
+	char *version_start;
+	char *version_end;
+
+	if (IS_ENABLED(CONFIG_KRAKEN_TEMP_GPS_TEST)) {
+		LOG_INF("OTA disabled in temporary GNSS hardware test build");
+		return false;
+	}
+
+	if (ota_download_started) {
+		return false;
+	}
+
+	err = getaddrinfo(HTTP_HOST, NULL, &hints, &res);
+	if (err != 0) {
+		LOG_WRN("OTA manifest DNS failed: %d", err);
+		return false;
+	}
+	((struct sockaddr_in *)res->ai_addr)->sin_port = htons(HTTP_PORT);
+
+	fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) {
+		LOG_WRN("OTA manifest socket failed: %d", errno);
+		freeaddrinfo(res);
+		return false;
+	}
+
+	if (bind(fd, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0 ||
+	    blocking_connect(fd, res->ai_addr, sizeof(struct sockaddr_in)) < 0) {
+		LOG_WRN("OTA manifest connection failed: %d", errno);
+		close(fd);
+		freeaddrinfo(res);
+		return false;
+	}
+	freeaddrinfo(res);
+
+	snprintf(request, sizeof(request),
+		 "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+		 OTA_MANIFEST_PATH, HTTP_HOST);
+	if (blocking_send(fd, request, strlen(request), 0) < 0) {
+		LOG_WRN("OTA manifest request failed: %d", errno);
+		close(fd);
+		return false;
+	}
+
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+	do {
+		received = recv(fd, response + response_len,
+				sizeof(response) - response_len - 1, 0);
+		if (received > 0) {
+			response_len += (size_t)received;
+		}
+	} while (received > 0 && response_len < sizeof(response) - 1);
+	close(fd);
+	if (response_len == 0) {
+		LOG_WRN("OTA manifest response failed: %d", received);
+		return false;
+	}
+
+	response[response_len] = '\0';
+	update_available = strstr(response, "\"available\":true") != NULL ||
+			   strstr(response, "\"available\": true") != NULL;
+	if (!update_available) {
+		LOG_INF("OTA manifest: no update pending");
+		return false;
+	}
+
+	version_start = strstr(response, "\"version\"");
+	version_start = version_start != NULL ? strchr(version_start, ':') : NULL;
+	while (version_start != NULL && (*++version_start == ' ' || *version_start == '\t')) {
+	}
+	if (version_start == NULL || *version_start != '\"') {
+		LOG_WRN("OTA manifest has no valid version; refusing update");
+		return false;
+	}
+	version_end = strchr(++version_start, '\"');
+	if (version_end == NULL || (size_t)(version_end - version_start) >= sizeof(manifest_version)) {
+		LOG_WRN("OTA manifest version is invalid");
+		return false;
+	}
+	memcpy(manifest_version, version_start, version_end - version_start);
+	if (strcmp(manifest_version, CONFIG_MCUBOOT_IMAGE_VERSION) == 0) {
+		LOG_INF("OTA version %s is already installed", manifest_version);
+		return false;
+	}
+
+	LOG_INF("OTA manifest: updating %s to %s", CONFIG_MCUBOOT_IMAGE_VERSION,
+		manifest_version);
+	ota_download_progress = 0;
+	ota_download_failed = false;
+	startup_stage = STARTUP_STAGE_OTA_DOWNLOAD;
+	err = fota_download_start(OTA_HTTP_HOST, OTA_FIRMWARE_PATH, -1, 0, 0);
+	if (err != 0) {
+		LOG_ERR("OTA download start failed: %d", err);
+		ota_download_failed = true;
+		return false;
+	}
+
+	ota_download_started = true;
+	return true;
+}
+
 void flash_firmware(){
 
 	int err = 0;
@@ -1715,6 +1881,10 @@ void send_to_cloud(void)
 
 static bool menu_can_add_coordinate(void)
 {
+	if (IS_ENABLED(CONFIG_KRAKEN_TEMP_GPS_TEST)) {
+		return false;
+	}
+
 	return active_point_valid && (last_fix == 0);
 }
 
@@ -1726,6 +1896,9 @@ static const char *menu_item_text(int index)
 	case 1:
 		return menu_can_add_coordinate() ? "ADD COORDINATE" : "GPS REACTIVATE";
 	case 2:
+		if (IS_ENABLED(CONFIG_KRAKEN_TEMP_GPS_TEST)) {
+			return "OFF";
+		}
 		return "RELOAD COORDINATES";
 	case 3:
 		return "OFF";
@@ -1736,6 +1909,13 @@ static const char *menu_item_text(int index)
 
 static int send_manual_coordinate(double latitude, double longitude)
 {
+	#if defined(CONFIG_KRAKEN_TEMP_GPS_TEST)
+		ARG_UNUSED(latitude);
+		ARG_UNUSED(longitude);
+		LOG_WRN("Manual coordinate upload disabled in temporary GNSS hardware test build");
+		return -ENOTSUP;
+#else
+
 	int err = 0;
 	struct sockaddr_in local_addr;
 	struct addrinfo *res = NULL;
@@ -1840,6 +2020,7 @@ out_disconnect:
 	k_mutex_unlock(&lte_mutex);
 
 	return err;
+#endif
 }
 
 float sensor_value_to_float(const struct sensor_value *val)
@@ -1936,13 +2117,15 @@ void accelerometer_thread(void *a, void *b, void *c) {
 
 		struct sensor_value accel[3];
 		if (sensor_sample_fetch(lis2dh) < 0) {
-			LOG_INF("Erreur lors de la récupération des données du capteur\n");
-			return;
+			LOG_WRN("Erreur lors de la récupération des données du capteur");
+			k_sleep(K_MSEC(measure_rate));
+			continue;
 		}
 
 		if (sensor_channel_get(lis2dh, SENSOR_CHAN_ACCEL_XYZ, accel) < 0) {
-			LOG_INF("Erreur lors dze la récupération des données du capteur\n");
-			return;
+			LOG_WRN("Erreur lors de la récupération des données du capteur");
+			k_sleep(K_MSEC(measure_rate));
+			continue;
 		}
 
 		float ax = sensor_value_to_float(&accel[0]);
@@ -2025,13 +2208,16 @@ void tap_thread(void *a, void *b, void *c) {
 				peak_y = tap_y;
 			}
 
-			if ((now_ms - impulse_start_ms) <= tap_direction_window_ms) {
+			if ((now_ms - impulse_start_ms) > tap_impulse_timeout_ms) {
+				/* A missed release must not permanently disable menu input. */
+				in_impulse = false;
+			} else if ((now_ms - impulse_start_ms) <= tap_direction_window_ms) {
 				onset_sum_x += tap_x;
 				onset_sum_y += tap_y;
 				onset_samples++;
 			}
 
-			if (plane <= tap_release_threshold) {
+			if (in_impulse && plane <= tap_release_threshold) {
 				float onset_x = onset_samples > 0 ? (onset_sum_x / onset_samples) : peak_x;
 				float onset_y = onset_samples > 0 ? (onset_sum_y / onset_samples) : peak_y;
 				float dir_x = (tap_peak_weight * peak_x) + ((1.0f - tap_peak_weight) * onset_x);
@@ -2128,7 +2314,13 @@ k_mutex_unlock(&state.mutex);
 						} else {
 							gnss_has_fix = false;
 
-							last_fix = (uint32_t)((k_uptime_get() - fix_timestamp) / 1000);
+							if (gps_capture_mode != GPS_CAPTURE_DORMANT) {
+								last_fix = (uint32_t)((k_uptime_get() - fix_timestamp) / 1000);
+							} else if (last_new_point_ms > 0) {
+								last_fix = (uint32_t)((k_uptime_get() - last_new_point_ms) / 1000);
+							} else {
+								last_fix = 0;
+							}
 							gnss_display_dirty = true;
 
 							if (gps_capture_mode == GPS_CAPTURE_ACTIVE &&
@@ -2202,6 +2394,9 @@ if(lte_state == 0){
 
 void reload_coordinates(const struct device *i2c_dev){
 	ARG_UNUSED(i2c_dev);
+	#if defined(CONFIG_KRAKEN_TEMP_GPS_TEST)
+		LOG_INF("Coordinate reload disabled in temporary GNSS hardware test build");
+	#else
 
 	menu = -1;
 	first = 0;
@@ -2220,6 +2415,7 @@ void reload_coordinates(const struct device *i2c_dev){
 	} else {
 		LOG_INF("reload_coordinates: fetch already running");
 	}
+	#endif
 }
 
 
@@ -2228,24 +2424,28 @@ void coordinates_thread(void *a, void *b, void *c)
 	ARG_UNUSED(a);
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
+	#if defined(CONFIG_KRAKEN_TEMP_GPS_TEST)
+	LOG_INF("Coordinate fetch thread disabled in temporary GNSS hardware test build");
+	#else
 	coordinates_fetch_running = true;
 
-	/* Give GNSS priority at boot to avoid starving early satellite acquisition. */
-	startup_stage = STARTUP_STAGE_GNSS_WARMUP;
-	int64_t warmup_deadline = k_uptime_get() + 30000;
-	while (!gnss_has_fix && k_uptime_get() < warmup_deadline) {
-		k_sleep(K_SECONDS(1));
-	}
-	LOG_INF("coordinates_thread: GNSS warmup complete (fix=%d), starting LTE fetch", gnss_has_fix ? 1 : 0);
-
 	while (1) {
+		bool ota_started;
+
 		k_mutex_lock(&lte_mutex, K_FOREVER);
 		startup_stage = STARTUP_STAGE_LTE_CONNECT;
 		lte_connect();
 		LOG_INF("coordinates_thread: starting coordinates fetch");
 		initial_connexion();
-		lte_disconnect();
+		ota_started = ota_check_and_start();
+		if (!ota_started) {
+			lte_disconnect();
+		}
 		k_mutex_unlock(&lte_mutex);
+		if (ota_started) {
+			coordinates_fetch_running = false;
+			return;
+		}
 
 		if (targets_count > 0) {
 			LOG_INF("coordinates_thread: loaded %d targets", targets_count);
@@ -2259,6 +2459,7 @@ void coordinates_thread(void *a, void *b, void *c)
 	}
 
 	coordinates_fetch_running = false;
+	#endif
 }
 void firmware_update(const struct device *i2c_dev){
 
@@ -2563,7 +2764,9 @@ void off(const struct device *i2c_dev){
 	}
 
 	k_mutex_lock(&lte_mutex, K_FOREVER);
+	#if !defined(CONFIG_KRAKEN_TEMP_GPS_TEST)
 	lte_disconnect();
+	#endif
 	err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
 	if (err != 0) {
 		LOG_WRN("Failed to set modem power off mode: %d", err);
@@ -2777,8 +2980,15 @@ static void execute_menu_selection(const struct device *i2c_dev)
 			break;
 		}
 
+		if (gnss_start_capture() != 0) {
+			LOG_ERR("Unable to start GPS capture");
+			break;
+		}
+
 		gps_capture_mode = GPS_CAPTURE_ACTIVE;
+		fix_timestamp = k_uptime_get();
 		last_new_point_ms = k_uptime_get();
+		last_fix = 0;
 		gps_seen_fix_since_reactivate = false;
 		if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 			print_fix_data(&last_pvt);
@@ -2801,6 +3011,10 @@ static void execute_menu_selection(const struct device *i2c_dev)
 		first = 0;
 		break;
 	case 2:
+		if (IS_ENABLED(CONFIG_KRAKEN_TEMP_GPS_TEST)) {
+			off(i2c_dev);
+			break;
+		}
 		reload_coordinates(i2c_dev);
 		first = 0;
 		break;
@@ -2818,6 +3032,13 @@ static void execute_menu_selection(const struct device *i2c_dev)
 
 int main(void)
 {
+	int err;
+
+	/* Confirm a newly swapped image before any peripheral can delay or fail boot. */
+	err = boot_write_img_confirmed();
+	if (err != 0) {
+		LOG_WRN("Unable to confirm current MCUboot image: %d", err);
+	}
 
 	k_mutex_init(&display_mutex);
 	k_mutex_init(&lte_mutex);
@@ -2828,14 +3049,15 @@ int main(void)
 	k_condvar_init(&motion_cond);
 	k_sem_init(&wake_sem, 0, 1);
 	state.ready = false;
+	off_mode_active = false;
 	uint8_t x = 0, y = 0;
 	char message[128];
-	int err;
 	bool home_screen_cleared = false;
 	uint8_t battery_pct = 0;
 	uint8_t displayed_battery_pct = 0xFF;
 	uint8_t displayed_startup_stage = 0xFF;
 	uint8_t displayed_startup_visible = 0xFF;
+	int displayed_ota_progress = -2;
 	bool battery_valid = false;
 	int64_t next_battery_poll_ms = 0;
 	tap_accept_after_ms = k_uptime_get() + tap_boot_guard_ms;
@@ -2868,11 +3090,10 @@ int main(void)
 
 	accel_sensor = DEVICE_DT_GET_ONE(st_lis2dh);
 	if (!device_is_ready(accel_sensor)) {
-        LOG_ERR("Erreur : LIS2DH non prêt\n");
-		while (true) {
-			k_sleep(K_SECONDS(1));
-		}
-    }
+		LOG_ERR("LIS2DH unavailable after boot; restarting to recover I2C");
+		k_sleep(K_SECONDS(2));
+		sys_reboot(SYS_REBOOT_COLD);
+	}
 
 	{
 		struct sensor_value odr = {
@@ -2896,6 +3117,16 @@ int main(void)
 		LOG_ERR("Modem library initialization failed, error: %d", err);
 		while (true) {
 			k_sleep(K_SECONDS(1));
+		}
+	}
+
+	if (!IS_ENABLED(CONFIG_KRAKEN_TEMP_GPS_TEST)) {
+		err = fota_download_init(ota_download_handler);
+		if (err != 0) {
+			LOG_ERR("Failed to initialize OTA downloader: %d", err);
+			while (true) {
+				k_sleep(K_SECONDS(1));
+			}
 		}
 	}
 
@@ -2923,30 +3154,28 @@ int main(void)
 		}
 	}
 
-	if (gnss_init_and_start() != 0) {
-		LOG_ERR("Failed to initialize and start GNSS");
+	if (gnss_init() != 0) {
+		LOG_ERR("Failed to initialize GNSS");
 		while (true) {
 			k_sleep(K_SECONDS(1));
 		}
 	}
 
-	/* Explicit runtime init: always begin with a fresh GPS reactivation cycle at boot. */
-	gps_capture_mode = GPS_CAPTURE_REACTIVATING;
+	/* Boot in the same no-signal state used after GPS capture becomes dormant. */
+	gps_capture_mode = GPS_CAPTURE_DORMANT;
 	active_point_valid = false;
 	last_new_point_ms = 0;
+	last_fix = 0;
+	ref_lastfix = UINT32_MAX;
 	gps_seen_fix_since_reactivate = false;
 	gnss_display_dirty = true;
 	last_tracked = 0xFF;
 	last_in_fix = 0xFF;
 	last_unhealthy = 0xFF;
 
-	LOG_INF("main: GNSS started, scheduling coordinates thread");
-	k_thread_create(&coordinates_data, coordinates_stack, K_THREAD_STACK_SIZEOF(coordinates_stack),
-			coordinates_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
-
-	LOG_INF("main: starting initial GNSS phase");
-	LOG_INF("GPS capture mode at boot: REACTIVATING");
-	fix_timestamp = k_uptime_get();
+	startup_stage = STARTUP_STAGE_READY;
+	LOG_INF("main: GPS and coordinate reload dormant at boot");
+	fix_timestamp = 0;
 
 	while(true){
 
@@ -3005,17 +3234,29 @@ int main(void)
 		}
 
 		if (show_startup_stage) {
-			if (displayed_startup_stage != startup_stage || displayed_startup_visible != 1) {
-				snprintf(message, sizeof(message), "%s", startup_stage_text(startup_stage));
+			if (displayed_startup_stage != startup_stage || displayed_startup_visible != 1 ||
+			    (startup_stage == STARTUP_STAGE_OTA_DOWNLOAD &&
+			     displayed_ota_progress != ota_download_progress)) {
+				if (startup_stage == STARTUP_STAGE_OTA_DOWNLOAD) {
+					if (ota_download_failed) {
+						snprintf(message, sizeof(message), "OTA ERROR");
+					} else {
+						snprintf(message, sizeof(message), "OTA %d%%", ota_download_progress);
+					}
+				} else {
+					snprintf(message, sizeof(message), "%s", startup_stage_text(startup_stage));
+				}
 				write_line(i2c_dev, "                     ", 0, 24, 1);
 				write_line(i2c_dev, message, 0, 24, 1);
 				displayed_startup_stage = startup_stage;
 				displayed_startup_visible = 1;
+				displayed_ota_progress = ota_download_progress;
 			}
 		} else if (displayed_startup_visible != 0) {
 			/* Do not blank y=24 here: this row is reused by target line #1 in READY state. */
 			displayed_startup_visible = 0;
 			displayed_startup_stage = startup_stage;
+			displayed_ota_progress = -2;
 			gnss_display_dirty = true;
 		}
 

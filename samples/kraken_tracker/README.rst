@@ -139,3 +139,22 @@ From nrfxlib
 
 From Zephyr
   * :ref:`net_socket_offloading`
+
+OTA application updates
+***********************
+
+The tracker checks ``/ota/manifest`` only while LTE is connected by the
+``RELOAD COORDINATES`` menu action. At boot it neither connects LTE nor checks
+for a new image.
+
+After a successful build, publish the signed MCUboot image with:
+
+.. code-block:: console
+
+  ./scripts/publish_ota.sh
+
+The script uploads ``build/kraken_tracker/zephyr/app_update.bin`` to
+``plongee.duckdns.org``, prints its SHA-256 digest, and enables a one-shot OTA
+manifest. The next tracker requesting the manifest downloads the signed image,
+MCUboot validates it, and the tracker reboots into the update. Do not publish an
+image that has already been flashed to the device.
